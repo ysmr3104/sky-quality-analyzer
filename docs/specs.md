@@ -423,19 +423,130 @@ _（設計中 — 以下はドラフト）_
    - CSV / テキストへのエクスポート
 ```
 
-### 7.2 UI 設計（ドラフト）
+### 7.2 機材データベース（equipment.json）
+
+カメラと鏡筒の仕様を JSON ファイルで管理し、UI のドロップダウンから選択することでパラメータを自動入力できるようにします。`INSTRUME` FITS キーワードと照合して自動選択も可能にします。
+
+#### 7.2.1 スキーマ設計
+
+```json
+{
+  "cameras": [
+    {
+      "name": "ZWO ASI294MC Pro",
+      "instrume": "ZWO ASI294MC Pro",
+      "pixel_pitch": 4.63,
+      "sensor_width": 4144,
+      "sensor_height": 2822,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": [
+        { "label": "LCG", "gain_min": 0,   "gain_max": 119, "egain": 3.6,  "read_noise": 7.4 },
+        { "label": "HCG", "gain_min": 120, "gain_max": 570, "egain": 0.97, "read_noise": 1.2 }
+      ]
+    },
+    {
+      "name": "ZWO ASI294MM Pro",
+      "instrume": "ZWO ASI294MM Pro",
+      "pixel_pitch": 4.63,
+      "sensor_width": 4144,
+      "sensor_height": 2822,
+      "color_type": "mono",
+      "bayer_pattern": null,
+      "sqm_channel": "L",
+      "gain_modes": [
+        { "label": "LCG", "gain_min": 0,   "gain_max": 119, "egain": 3.6,  "read_noise": 7.4 },
+        { "label": "HCG", "gain_min": 120, "gain_max": 570, "egain": 0.97, "read_noise": 1.2 }
+      ]
+    }
+  ],
+  "telescopes": [
+    {
+      "name": "William Optics RedCat 51",
+      "focal_length": 250,
+      "aperture": 51,
+      "f_ratio": 4.9
+    },
+    {
+      "name": "Custom",
+      "focal_length": 0,
+      "aperture": 0,
+      "f_ratio": 0
+    }
+  ]
+}
+```
+
+#### 7.2.2 カメラフィールドの説明
+
+| フィールド | 型 | 説明 |
+|-----------|-----|------|
+| `name` | string | UI 表示名 |
+| `instrume` | string | FITS `INSTRUME` キーワードの値（自動照合に使用） |
+| `pixel_pitch` | number | ピクセルサイズ [μm] |
+| `sensor_width` | number | センサー横幅 [px] |
+| `sensor_height` | number | センサー縦幅 [px] |
+| `color_type` | string | `"color"` または `"mono"` |
+| `bayer_pattern` | string\|null | OSC の場合 `"RGGB"` 等。モノクロは `null` |
+| `sqm_channel` | string | SQM 算出に使うチャンネルの推奨値。OSC は `"G"`、モノクロは `"L"` |
+| `gain_modes` | array\|null | ゲイン設定値→実効ゲイン（e⁻/ADU）の対応表。非対応カメラは `null` |
+
+#### 7.2.3 チャンネル選択のロジック
+
+```
+color_type == "color" の場合:
+  → sqm_channel = "G"（デフォルト）
+  → ユーザーが R / G / B から変更可能
+
+color_type == "mono" の場合:
+  → sqm_channel = "L"（チャンネル選択不要）
+
+いずれも:
+  → FITS の NAXIS3 == 1（モノクロ画像）なら強制的に "L" 扱い
+  → FITS の NAXIS3 == 3（RGB 画像）なら R/G/B から選択
+```
+
+#### 7.2.4 ゲイン設定値から e⁻/ADU を解決するロジック
+
+```
+1. FITS ヘッダーの EGAIN が存在する → その値を使用
+2. FITS ヘッダーの GAIN（設定値）と gain_modes テーブルを照合
+   → 設定値が gain_min ≤ GAIN ≤ gain_max のモードの egain を使用
+3. いずれも取得できない → ユーザーが手動入力
+```
+
+#### 7.2.5 鏡筒フィールドの説明
+
+| フィールド | 型 | 説明 |
+|-----------|-----|------|
+| `name` | string | UI 表示名 |
+| `focal_length` | number | 焦点距離 [mm]（0 はカスタム入力） |
+| `aperture` | number | 口径 [mm] |
+| `f_ratio` | number | F 値 |
+
+ピクセルスケールは選択されたカメラとビニング設定から自動計算:
+```
+pixel_scale = (pixel_pitch × binning / focal_length) × 206.265
+```
+
+### 7.3 UI 設計（ドラフト）
 
 ```
 ┌─ Sky Quality Analyzer ──────────────────────────┐
 │                                                  │
 │  対象画像: [アクティブ画像名]                      │
 │                                                  │
+│  ─── 機材 ─────────────────────────────────────  │
+│  カメラ:   [ZWO ASI294MC Pro         ▼]          │
+│  鏡筒:     [William Optics RedCat 51 ▼]          │
+│  チャンネル: [G ▼]   ビニング: [1 ▼]             │
+│                                                  │
 │  ─── パラメータ ───────────────────────────────  │
 │  露出時間:      [________] 秒  [FITSから取得]    │
-│  ピクセルスケール: [______] arcsec/px             │
-│  ゲイン:        [________] e⁻/ADU               │
+│  ピクセルスケール: [ 3.82 ] arcsec/px  [自動]    │
+│  ゲイン:        [ 0.97  ] e⁻/ADU      [自動]    │
 │  ゼロ点:        [________] mag                   │
-│  フィルター:    [________]                        │
 │                                                  │
 │  ─── バックグラウンド測定 ───────────────────────  │
 │  測定領域: ○ 全体  ○ 指定領域                     │
@@ -451,24 +562,27 @@ _（設計中 — 以下はドラフト）_
 └──────────────────────────────────────────────────┘
 ```
 
-### 7.3 FITS ヘッダーからのメタデータ取得
+機材ドロップダウンで選択すると、ピクセルスケール・ゲイン・チャンネルが自動入力されます。FITS ヘッダーの `INSTRUME` キーワードと一致するカメラが DB に存在する場合は起動時に自動選択します。
+
+### 7.4 FITS ヘッダーからのメタデータ取得
 
 読み込む FITS キーワードとフォールバック順:
 
 | パラメータ | キーワード（優先順） | フォールバック |
 |-----------|-------------------|-------------|
 | 露出時間 | `EXPTIME`, `EXPOSURE` | 手動入力 |
-| ピクセルスケール | `PIXSCALE` | `FOCALLEN` + `XPIXSZ` から計算、または手動入力 |
-| ゲイン | `GAIN`, `EGAIN` | 手動入力 |
+| ピクセルスケール | `PIXSCALE` | `FOCALLEN` + `XPIXSZ` から計算 → 機材 DB + ビニングから計算 → 手動入力 |
+| 実効ゲイン | `EGAIN` | 機材 DB の `gain_modes` + `GAIN` 設定値から解決 → 手動入力 |
 | ゼロ点 | `MAGZERO`, `MAGZP`, `PHOTZP` | 手動入力 |
 | フィルター | `FILTER` | 手動入力 |
 | ビニング | `XBINNING` | 1（デフォルト） |
+| カメラ識別 | `INSTRUME` | 機材 DB と照合して自動選択 |
 
-### 7.4 エクスポート形式
+### 7.5 エクスポート形式
 
 ```csv
-Date,Target,Filter,Exptime,PixScale,Gain,ZeroPoint,BG_ADU,SQM,Notes
-2026-03-23T21:30:00,M42,L,300,1.23,1.0,20.5,512.3,20.45,遠征地A
+Date,Target,Camera,Telescope,Channel,Filter,Exptime,Binning,PixScale,Egain,ZeroPoint,BG_ADU,SQM,Notes
+2026-03-23T21:30:00,M42,ZWO ASI294MC Pro,RedCat 51,G,,300,1,3.82,0.97,20.5,512.3,20.45,遠征地A
 ```
 
 ---
