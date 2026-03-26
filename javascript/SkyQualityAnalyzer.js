@@ -1256,7 +1256,7 @@ SkyQualityAnalyzerDialog.prototype.clearResults = function() {
    this.resultLStarLabel.text     = "L_star:          —";
    this.resultPixScaleLabel.text  = "Pixel Scale:     —";
    this.resultNFramesLabel.text   = "Frames used:     —";
-   this.exportCSVBtn.enabled      = false;
+   if (this.exportCSVBtn) this.exportCSVBtn.enabled = false;
    this.sqmResult = null;
 };
 
