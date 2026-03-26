@@ -765,10 +765,6 @@ function SkyQualityAnalyzerDialog() {
    titleLabel.text = "<b>" + TITLE + "</b>  —  Reference Star Method";
    titleLabel.textAlignment = TextAlign_Center | TextAlign_VertCenter;
 
-   var hline1 = new Frame(this);
-   hline1.frameStyle = FrameStyle_Sunken;
-   hline1.setFixedHeight(1);
-
    // =====================================================
    // Section 1: Frames
    // =====================================================
@@ -1209,7 +1205,7 @@ function SkyQualityAnalyzerDialog() {
    this.sizer.margin  = 10;
    this.sizer.spacing = 8;
    this.sizer.add(titleLabel);
-   this.sizer.add(hline1);
+
    this.sizer.add(framesGroupBox);
    this.sizer.add(equipGroupBox);
    this.sizer.add(measureGroupBox);
