@@ -791,9 +791,13 @@ function SkyQualityAnalyzerDialog() {
    addFramesBtn.toolTip = "Add calibrated FITS frames";
    addFramesBtn.onClick = function() {
       var od = new OpenFileDialog;
-      od.caption      = "Select Calibrated FITS Frames";
+      od.caption      = "Select Calibrated Frames (FITS / XISF)";
       od.multipleSelections = true;
-      od.filters = [["FITS Files", "*.fit", "*.fits", "*.fts"]];
+      od.filters = [
+         ["All Supported Files", "*.xisf", "*.fit", "*.fits", "*.fts"],
+         ["XISF Files", "*.xisf"],
+         ["FITS Files", "*.fit", "*.fits", "*.fts"]
+      ];
       if (!od.execute()) return;
 
       var added = 0;
