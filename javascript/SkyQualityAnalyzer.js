@@ -31,7 +31,7 @@
 
 // Script directory (used to locate equipment.json at runtime)
 var SCRIPT_PATH = #__FILE__;
-var SCRIPT_DIR  = File.extractDrive(SCRIPT_PATH) + File.extractDir(SCRIPT_PATH);
+var SCRIPT_DIR  = File.extractDrive(SCRIPT_PATH) + File.extractDirectory(SCRIPT_PATH);
 
 //============================================================================
 // Equipment database
