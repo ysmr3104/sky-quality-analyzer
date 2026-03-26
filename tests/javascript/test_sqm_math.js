@@ -151,13 +151,13 @@ assert(isNaN(math.computeSQM(-1, 1.0, 4.7)), "negative L_star returns NaN");
 // ============================================================
 console.log("\n--- skyConditionLabel ---");
 
-assert(math.skyConditionLabel(22.5) === "完璧な暗黒空",      "22.5 → 完璧な暗黒空");
-assert(math.skyConditionLabel(21.7) === "真の暗黒空",        "21.7 → 真の暗黒空");
-assert(math.skyConditionLabel(21.2) === "優良（農村の空）",   "21.2 → 優良");
-assert(math.skyConditionLabel(20.5) === "良好（郊外の空）",   "20.5 → 良好");
-assert(math.skyConditionLabel(19.5) === "普通",              "19.5 → 普通");
-assert(math.skyConditionLabel(18.4) === "光害あり（明るい郊外）", "18.4 → 光害あり");
-assert(math.skyConditionLabel(17.0) === "都市部",            "17.0 → 都市部");
+assert(math.skyConditionLabel(22.5) === "Pristine Dark Sky",          "22.5 → Pristine Dark Sky");
+assert(math.skyConditionLabel(21.7) === "Truly Dark Sky",             "21.7 → Truly Dark Sky");
+assert(math.skyConditionLabel(21.2) === "Rural Sky",                  "21.2 → Rural Sky");
+assert(math.skyConditionLabel(20.5) === "Rural/Suburban Transition",  "20.5 → Rural/Suburban Transition");
+assert(math.skyConditionLabel(19.5) === "Suburban Sky",               "19.5 → Suburban Sky");
+assert(math.skyConditionLabel(18.4) === "Bright Suburban Sky",        "18.4 → Bright Suburban Sky");
+assert(math.skyConditionLabel(17.0) === "Urban Sky",                  "17.0 → Urban Sky");
 
 // ============================================================
 // normalizedToADU

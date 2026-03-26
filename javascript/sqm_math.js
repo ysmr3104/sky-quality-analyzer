@@ -196,13 +196,13 @@ function computePixelScale(pixel_pitch_um, focal_length_mm, binning) {
  * @returns {string}
  */
 function skyConditionLabel(sqm) {
-    if (sqm >= 22.0) return "完璧な暗黒空";
-    if (sqm >= 21.5) return "真の暗黒空";
-    if (sqm >= 21.0) return "優良（農村の空）";
-    if (sqm >= 20.0) return "良好（郊外の空）";
-    if (sqm >= 19.0) return "普通";
-    if (sqm >= 18.0) return "光害あり（明るい郊外）";
-    return "都市部";
+    if (sqm >= 22.0) return "Pristine Dark Sky";
+    if (sqm >= 21.5) return "Truly Dark Sky";
+    if (sqm >= 21.0) return "Rural Sky";
+    if (sqm >= 20.0) return "Rural/Suburban Transition";
+    if (sqm >= 19.0) return "Suburban Sky";
+    if (sqm >= 18.0) return "Bright Suburban Sky";
+    return "Urban Sky";
 }
 
 /**
