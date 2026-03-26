@@ -13,7 +13,7 @@
 // Copyright (c) 2026 Sky Quality Analyzer Project
 //----------------------------------------------------------------------------
 
-#define VERSION "1.0.0"
+#define VERSION "0.0.1"
 
 #include <pjsr/DataType.jsh>
 #include <pjsr/StdIcon.jsh>
@@ -753,7 +753,7 @@ function SkyQualityAnalyzerDialog() {
    this.starX     = -1;           // Reference star X
    this.starY     = -1;           // Reference star Y
    this.vmag      = NaN;          // V magnitude
-   this.result    = null;         // Last analysis result
+   this.sqmResult = null;         // Last analysis result
 
    this.windowTitle = TITLE + " v" + VERSION;
    this.minWidth    = 640;
@@ -1167,14 +1167,14 @@ function SkyQualityAnalyzerDialog() {
    this.exportCSVBtn.toolTip = "Export analysis results to CSV file";
    this.exportCSVBtn.enabled = false;
    this.exportCSVBtn.onClick = function() {
-      if (!self.result) return;
+      if (!self.sqmResult) return;
       var sd = new SaveFileDialog;
       sd.caption  = "Save Results as CSV";
       sd.filters  = [["CSV Files", "*.csv"]];
       sd.fileName = "sqm_result.csv";
       if (!sd.execute()) return;
       try {
-         exportCSV(self.result, self.frames, sd.fileName);
+         exportCSV(self.sqmResult, self.frames, sd.fileName);
          console.writeln("Results exported: " + sd.fileName);
          var mb = new MessageBox("Exported:\n" + sd.fileName, TITLE, StdIcon_NoIcon, StdButton_Ok);
          mb.execute();
@@ -1261,7 +1261,7 @@ SkyQualityAnalyzerDialog.prototype.clearResults = function() {
    this.resultPixScaleLabel.text  = "Pixel Scale:     —";
    this.resultNFramesLabel.text   = "Frames used:     —";
    this.exportCSVBtn.enabled      = false;
-   this.result = null;
+   this.sqmResult = null;
 };
 
 SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
@@ -1342,7 +1342,7 @@ SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
          return;
       }
 
-      this.result = result;
+      this.sqmResult = result;
 
       console.writeln("");
       console.writeln("<b>Results:</b>");
