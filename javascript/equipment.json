@@ -1,0 +1,314 @@
+{
+  "cameras": [
+    {
+      "name": "ZWO ASI294MC Pro",
+      "instrume": "ZWO ASI294MC Pro",
+      "pixel_pitch": 4.63,
+      "sensor_width": 4144,
+      "sensor_height": 2822,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": [
+        { "label": "LCG", "gain_min": 0,   "gain_max": 119, "egain": 3.6,  "read_noise": 7.4 },
+        { "label": "HCG", "gain_min": 120, "gain_max": 570, "egain": 0.97, "read_noise": 1.2 }
+      ]
+    },
+    {
+      "name": "ZWO ASI294MM Pro",
+      "instrume": "ZWO ASI294MM Pro",
+      "pixel_pitch": 4.63,
+      "sensor_width": 4144,
+      "sensor_height": 2822,
+      "color_type": "mono",
+      "bayer_pattern": null,
+      "sqm_channel": "L",
+      "gain_modes": [
+        { "label": "LCG", "gain_min": 0,   "gain_max": 119, "egain": 3.6,  "read_noise": 7.4 },
+        { "label": "HCG", "gain_min": 120, "gain_max": 570, "egain": 0.97, "read_noise": 1.2 }
+      ]
+    },
+    {
+      "name": "ZWO ASI2600MC Pro",
+      "instrume": "ZWO ASI2600MC Pro",
+      "pixel_pitch": 3.76,
+      "sensor_width": 6248,
+      "sensor_height": 4176,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": [
+        { "label": "LCG", "gain_min": 0,   "gain_max": 99,  "egain": 3.76, "read_noise": 7.7 },
+        { "label": "HCG", "gain_min": 100, "gain_max": 600, "egain": 1.0,  "read_noise": 1.5 }
+      ]
+    },
+    {
+      "name": "ZWO ASI2600MM Pro",
+      "instrume": "ZWO ASI2600MM Pro",
+      "pixel_pitch": 3.76,
+      "sensor_width": 6248,
+      "sensor_height": 4176,
+      "color_type": "mono",
+      "bayer_pattern": null,
+      "sqm_channel": "L",
+      "gain_modes": [
+        { "label": "LCG", "gain_min": 0,   "gain_max": 99,  "egain": 3.76, "read_noise": 7.7 },
+        { "label": "HCG", "gain_min": 100, "gain_max": 600, "egain": 1.0,  "read_noise": 1.5 }
+      ]
+    },
+    {
+      "name": "ZWO ASI6200MM Pro",
+      "instrume": "ZWO ASI6200MM Pro",
+      "pixel_pitch": 3.76,
+      "sensor_width": 9576,
+      "sensor_height": 6388,
+      "color_type": "mono",
+      "bayer_pattern": null,
+      "sqm_channel": "L",
+      "gain_modes": [
+        { "label": "Standard", "gain_min": 0, "gain_max": 600, "egain": 0.8, "read_noise": 3.3 }
+      ]
+    },
+    {
+      "name": "ZWO ASI6200MC Pro",
+      "instrume": "ZWO ASI6200MC Pro",
+      "pixel_pitch": 3.76,
+      "sensor_width": 9576,
+      "sensor_height": 6388,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": [
+        { "label": "Standard", "gain_min": 0, "gain_max": 600, "egain": 0.8, "read_noise": 3.3 }
+      ]
+    },
+    {
+      "name": "ZWO ASI533MC Pro",
+      "instrume": "ZWO ASI533MC Pro",
+      "pixel_pitch": 3.76,
+      "sensor_width": 3008,
+      "sensor_height": 3008,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "ZWO ASI071MC Pro",
+      "instrume": "ZWO ASI071MC Pro",
+      "pixel_pitch": 4.78,
+      "sensor_width": 4944,
+      "sensor_height": 3284,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "ZWO ASI183MC Pro",
+      "instrume": "ZWO ASI183MC Pro",
+      "pixel_pitch": 2.4,
+      "sensor_width": 5496,
+      "sensor_height": 3672,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "ZWO ASI585MC",
+      "instrume": "ZWO ASI585MC",
+      "pixel_pitch": 2.9,
+      "sensor_width": 3840,
+      "sensor_height": 2160,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "ZWO ASI678MC",
+      "instrume": "ZWO ASI678MC",
+      "pixel_pitch": 2.0,
+      "sensor_width": 3840,
+      "sensor_height": 2160,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "ZWO Seestar S50",
+      "instrume": "Seestar S50",
+      "pixel_pitch": 2.9,
+      "sensor_width": 1936,
+      "sensor_height": 1096,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "DWARFLAB DWARF 3",
+      "instrume": "DWARF 3",
+      "pixel_pitch": 2.0,
+      "sensor_width": 3840,
+      "sensor_height": 2160,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "QHY268C",
+      "instrume": "QHY268C",
+      "pixel_pitch": 3.76,
+      "sensor_width": 6252,
+      "sensor_height": 4176,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "QHY268M",
+      "instrume": "QHY268M",
+      "pixel_pitch": 3.76,
+      "sensor_width": 6252,
+      "sensor_height": 4176,
+      "color_type": "mono",
+      "bayer_pattern": null,
+      "sqm_channel": "L",
+      "gain_modes": null
+    },
+    {
+      "name": "QHY294M Pro",
+      "instrume": "QHY294M-Pro",
+      "pixel_pitch": 4.63,
+      "sensor_width": 4144,
+      "sensor_height": 2822,
+      "color_type": "mono",
+      "bayer_pattern": null,
+      "sqm_channel": "L",
+      "gain_modes": null
+    },
+    {
+      "name": "QHY600M",
+      "instrume": "QHY600M",
+      "pixel_pitch": 3.76,
+      "sensor_width": 9576,
+      "sensor_height": 6388,
+      "color_type": "mono",
+      "bayer_pattern": null,
+      "sqm_channel": "L",
+      "gain_modes": null
+    },
+    {
+      "name": "Player One Poseidon-C Pro",
+      "instrume": "Player One Poseidon-C Pro",
+      "pixel_pitch": 3.76,
+      "sensor_width": 6248,
+      "sensor_height": 4176,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "Player One Artemis-C Pro",
+      "instrume": "Player One Artemis-C Pro",
+      "pixel_pitch": 4.63,
+      "sensor_width": 4144,
+      "sensor_height": 2822,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    },
+    {
+      "name": "Custom",
+      "instrume": "",
+      "pixel_pitch": 0,
+      "sensor_width": 0,
+      "sensor_height": 0,
+      "color_type": "color",
+      "bayer_pattern": "RGGB",
+      "sqm_channel": "G",
+      "gain_modes": null
+    }
+  ],
+  "telescopes": [
+    {
+      "name": "William Optics RedCat 51",
+      "focal_length": 250,
+      "aperture": 51,
+      "f_ratio": 4.9
+    },
+    {
+      "name": "William Optics RedCat 71",
+      "focal_length": 350,
+      "aperture": 71,
+      "f_ratio": 4.9
+    },
+    {
+      "name": "William Optics ZenithStar 61",
+      "focal_length": 360,
+      "aperture": 61,
+      "f_ratio": 5.9
+    },
+    {
+      "name": "William Optics ZenithStar 73",
+      "focal_length": 430,
+      "aperture": 73,
+      "f_ratio": 5.9
+    },
+    {
+      "name": "Askar FRA300 Pro",
+      "focal_length": 300,
+      "aperture": 60,
+      "f_ratio": 5.0
+    },
+    {
+      "name": "Askar FRA400",
+      "focal_length": 400,
+      "aperture": 80,
+      "f_ratio": 5.0
+    },
+    {
+      "name": "Sky-Watcher Esprit 100ED",
+      "focal_length": 550,
+      "aperture": 100,
+      "f_ratio": 5.5
+    },
+    {
+      "name": "Sky-Watcher Esprit 120ED",
+      "focal_length": 840,
+      "aperture": 120,
+      "f_ratio": 7.0
+    },
+    {
+      "name": "Takahashi FSQ-85ED",
+      "focal_length": 450,
+      "aperture": 85,
+      "f_ratio": 5.3
+    },
+    {
+      "name": "Takahashi FSQ-106ED",
+      "focal_length": 530,
+      "aperture": 106,
+      "f_ratio": 5.0
+    },
+    {
+      "name": "DWARFLAB DWARF 3 (built-in)",
+      "focal_length": 150,
+      "aperture": 35,
+      "f_ratio": 4.3
+    },
+    {
+      "name": "Custom",
+      "focal_length": 0,
+      "aperture": 0,
+      "f_ratio": 0
+    }
+  ]
+}
