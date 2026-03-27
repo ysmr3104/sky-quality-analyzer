@@ -1233,8 +1233,14 @@ function SkyQualityAnalyzerDialog() {
          return;
       }
       var ap = self.apertureSpinBox.value;
+      // Prefer a frame that has WCS keywords for catalog lookup
+      var previewFrame = self.frames[0];
+      for (var fi = 0; fi < self.frames.length; fi++) {
+         var testWcs = readWCS(self.frames[fi].filepath);
+         if (testWcs !== null) { previewFrame = self.frames[fi]; break; }
+      }
       var dlg = new PointSelectionDialog(self, "Select Reference Star",
-         self.frames[0].filepath, "star", ap);
+         previewFrame.filepath, "star", ap);
       if (dlg.execute() === 1) {
          self.starX = dlg.selectedX;
          self.starY = dlg.selectedY;
