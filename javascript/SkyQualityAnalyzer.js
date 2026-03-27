@@ -1769,9 +1769,9 @@ function SkyQualityAnalyzerDialog() {
    this.exportCSVBtn.onClick = function() {
       if (!self.sqmResult) return;
       var sd = new SaveFileDialog;
-      sd.caption  = "Save Results as CSV";
-      sd.filters  = [["CSV Files", "*.csv"]];
-      sd.fileName = "sqm_result.csv";
+      sd.caption      = "Save Results as CSV";
+      sd.filters      = [["CSV Files", "*.csv"]];
+      sd.initialPath  = "sqm_result.csv";
       if (!sd.execute()) return;
       try {
          exportCSV(self.sqmResult, self.frames, sd.fileName);
