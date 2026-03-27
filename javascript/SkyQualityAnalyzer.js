@@ -890,10 +890,6 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture, preloaded
    this.preview = new PointPreviewControl(this, mode);
    this.preview.aperture = aperture || 15;
 
-   var loadLabel = new Label(this);
-   loadLabel.text = "Loading preview...";
-   loadLabel.textAlignment = TextAlign_Center | TextAlign_VertCenter;
-
    this.coordLabel = new Label(this);
    this.coordLabel.text = "Position: (not selected)";
    this.coordLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
