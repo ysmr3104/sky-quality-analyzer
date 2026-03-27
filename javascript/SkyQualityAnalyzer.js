@@ -193,56 +193,52 @@ function searchStarInfo(objectName) {
 // but they are NOT exposed via win.keywords. Parse the header directly.
 // imageHeight: pass image.height from the already-opened ImageWindow.
 function readXISFHeaderWCS(filepath, imageHeight) {
-   var f = new File;
-   var xml = null;
+   var xml = "";
    try {
-      f.open(filepath, FileMode_Read);
+      // Open file for reading (PixInsight PJSR File API)
+      var f = new File(filepath, FileMode_Read);
 
-      // Verify XISF signature: "XISF0100" = bytes 88,73,83,70,48,49,48,48
-      var s0 = f.read(DataType_UInt8), s1 = f.read(DataType_UInt8);
-      var s2 = f.read(DataType_UInt8), s3 = f.read(DataType_UInt8);
-      f.read(DataType_UInt8); f.read(DataType_UInt8);
-      f.read(DataType_UInt8); f.read(DataType_UInt8);
-      if (s0 !== 88 || s1 !== 73 || s2 !== 83 || s3 !== 70) {
-         f.close(); return null;
+      // Read and verify XISF signature (8 bytes: "XISF0100")
+      var sig = f.read(DataType_ByteArray, 8);
+      if (sig[0] !== 88 || sig[1] !== 73 || sig[2] !== 83 || sig[3] !== 70) {
+         return null; // not XISF
       }
 
-      // Header length (uint32 LE, bytes 8-11)
-      var b0 = f.read(DataType_UInt8), b1 = f.read(DataType_UInt8);
-      var b2 = f.read(DataType_UInt8), b3 = f.read(DataType_UInt8);
-      var hdrLen = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+      // Read header length (uint32 LE, 4 bytes)
+      var lb = f.read(DataType_ByteArray, 4);
+      var hdrLen = lb[0] | (lb[1] << 8) | (lb[2] << 16) | (lb[3] << 24);
 
       // Skip 4 reserved bytes
-      f.read(DataType_UInt8); f.read(DataType_UInt8);
-      f.read(DataType_UInt8); f.read(DataType_UInt8);
+      f.read(DataType_ByteArray, 4);
 
-      // Read XML header — WCS FITSKeyword elements appear within the first ~5KB.
-      // Stop early once both CD2_2 and CRPIX2 have been seen.
-      var xmlBuf = "";
-      var readMax = Math.min(hdrLen, 16384);
-      for (var ri = 0; ri < readMax; ri++) {
-         xmlBuf += String.fromCharCode(f.read(DataType_UInt8));
-         if ((ri & 0xFF) === 0xFF &&
-             xmlBuf.indexOf("CD2_2") >= 0 && xmlBuf.indexOf("CRPIX2") >= 0) break;
+      // Read up to 16KB of the XML header (WCS keywords appear within first ~4KB)
+      var readLimit = Math.min(hdrLen, 16384);
+      var xmlBytes = f.read(DataType_ByteArray, readLimit);
+
+      // Convert ByteArray → string in 4KB chunks; stop once WCS keywords are found
+      var chunkSize = 4096;
+      for (var ci = 0; ci < readLimit; ci += chunkSize) {
+         var endIdx = Math.min(ci + chunkSize, readLimit);
+         var slice = [];
+         for (var si = ci; si < endIdx; si++) slice.push(xmlBytes[si]);
+         xml += String.fromCharCode.apply(null, slice);
+         if (xml.indexOf("CD2_2") >= 0 && xml.indexOf("CRPIX2") >= 0) break;
       }
-      xml = xmlBuf;
-      f.close();
-   } catch(fe) {
-      try { f.close(); } catch(e2) {}
+   } catch(e) {
       return null;
    }
 
    if (!xml) return null;
 
-   // Extract value from <FITSKeyword name="X" value="Y" .../>
-   function extractKW(name) {
+   // Extract value attribute from <FITSKeyword name="X" value="Y" .../>
+   var extractKW = function(name) {
       var tag = 'name="' + name + '" value="';
       var idx = xml.indexOf(tag);
       if (idx < 0) return null;
       idx += tag.length;
       var end = xml.indexOf('"', idx);
       return (end >= 0) ? xml.substring(idx, end) : null;
-   }
+   };
 
    var crpix1 = parseFloat(extractKW("CRPIX1"));
    var crpix2 = parseFloat(extractKW("CRPIX2"));
