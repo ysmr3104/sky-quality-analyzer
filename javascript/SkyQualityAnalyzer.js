@@ -185,6 +185,184 @@ function searchStarInfo(objectName) {
 }
 
 //============================================================================
+// WCS: read keywords and convert pixel coordinates to RA/Dec
+//============================================================================
+
+// Read WCS keywords from a FITS/XISF file.
+// Returns a wcs object or null if keywords are missing.
+function readWCS(filepath) {
+   var wins = ImageWindow.open(filepath);
+   if (!wins || wins.length === 0) return null;
+   var win = wins[0];
+   var kws = win.keywords;
+   var h   = win.mainView.image.height;
+   win.close();
+
+   var crpix1 = parseFloat(getFITSKeyword(kws, "CRPIX1"));
+   var crpix2 = parseFloat(getFITSKeyword(kws, "CRPIX2"));
+   var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1")); // RA deg
+   var crval2 = parseFloat(getFITSKeyword(kws, "CRVAL2")); // Dec deg
+   var cd11   = parseFloat(getFITSKeyword(kws, "CD1_1"));
+   var cd12   = parseFloat(getFITSKeyword(kws, "CD1_2"));
+   var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
+   var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
+
+   if (isNaN(crpix1) || isNaN(crval1) || isNaN(cd11)) return null;
+
+   return { crpix1: crpix1, crpix2: crpix2,
+            crval1: crval1, crval2: crval2,
+            cd11: cd11, cd12: cd12,
+            cd21: cd21, cd22: cd22,
+            imageHeight: h };
+}
+
+// Convert PixInsight pixel (0-indexed, y-down) to RA/Dec using TAN projection.
+// Small-angle approximation — accurate to ~1 arcsec for fields < 3 degrees.
+function pixelToRaDec(wcs, px, py) {
+   var fitsX = px + 1.0;
+   var fitsY = wcs.imageHeight - py;        // y-flip: PixInsight y-down → FITS y-up
+   var dx = fitsX - wcs.crpix1;
+   var dy = fitsY - wcs.crpix2;
+   var xi  = wcs.cd11 * dx + wcs.cd12 * dy; // degrees
+   var eta = wcs.cd21 * dx + wcs.cd22 * dy;
+   var dec0 = wcs.crval2 * Math.PI / 180.0;
+   var ra   = wcs.crval1 + xi / Math.cos(dec0);
+   var dec  = wcs.crval2 + eta;
+   while (ra <    0) ra += 360;
+   while (ra >= 360) ra -= 360;
+   return { ra: ra, dec: dec };
+}
+
+//============================================================================
+// SIMBAD catalog query by position
+//============================================================================
+
+// Query SIMBAD for stars with V magnitude near (ra, dec).
+// Returns array of { id, ra, dec, vmag } sorted by V magnitude, or null on error.
+function querySIMBADNearby(ra, dec, radiusArcmin) {
+   var script = "output console=off script=off\n"
+              + "format object \"%IDLIST(1)|%COO(d,A)|%COO(d,D)|%FLUX(V)\"\n"
+              + "query around " + ra.toFixed(6) + " "
+              + (dec >= 0 ? "+" : "") + dec.toFixed(6)
+              + " radius=" + radiusArcmin.toFixed(1) + "m\n";
+
+   var scriptFile = File.systemTempDirectory + "/sqm_simbad_script.txt";
+   var outFile    = File.systemTempDirectory + "/sqm_simbad_out.txt";
+   File.writeTextFile(scriptFile, script);
+
+   var P = new ExternalProcess;
+   P.start("curl", ["-s", "-o", outFile, "-m", "20",
+      "--data-urlencode", "script@" + scriptFile,
+      "http://simbad.u-strasbg.fr/simbad/sim-script"]);
+   if (!P.waitForFinished(25000)) { P.kill(); return null; }
+   try { File.remove(scriptFile); } catch (e) {}
+   if (!File.exists(outFile)) return null;
+
+   var content = "";
+   try { content = File.readTextFile(outFile); File.remove(outFile); } catch (e) {}
+
+   var stars = [];
+   var lines = content.split("\n");
+   for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (line.length === 0 || line.charAt(0) === ":" || line.charAt(0) === "#") continue;
+      var parts = line.split("|");
+      if (parts.length < 4) continue;
+      var id   = parts[0].trim();
+      var sra  = parseFloat(parts[1]);
+      var sdec = parseFloat(parts[2]);
+      var vmag = parseFloat(parts[3]);
+      if (id.length > 0 && !isNaN(sra) && !isNaN(sdec) && !isNaN(vmag)) {
+         stars.push({ id: id, ra: sra, dec: sdec, vmag: vmag });
+      }
+   }
+   stars.sort(function(a, b) { return a.vmag - b.vmag; });
+   return stars;
+}
+
+//============================================================================
+// NearbyStarDialog — show SIMBAD results, user picks a star
+//============================================================================
+
+function NearbyStarDialog(stars) {
+   this.__base__ = Dialog;
+   this.__base__();
+
+   var self = this;
+   this.selectedStar = null;
+   this.windowTitle  = "Nearby Stars — SIMBAD";
+   this.minWidth     = 520;
+
+   var infoLabel = new Label(this);
+   infoLabel.text = "Stars near the clicked position (sorted by V magnitude):";
+   infoLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+
+   this.starTree = new TreeBox(this);
+   this.starTree.headerVisible   = true;
+   this.starTree.numberOfColumns = 3;
+   this.starTree.setColumnWidth(0, 260);
+   this.starTree.setColumnWidth(1, 70);
+   this.starTree.setColumnWidth(2, 100);
+   this.starTree.setHeaderText(0, "Identifier");
+   this.starTree.setHeaderText(1, "V mag");
+   this.starTree.setHeaderText(2, "RA (deg)");
+   this.starTree.minHeight = 220;
+
+   for (var i = 0; i < stars.length; i++) {
+      var s    = stars[i];
+      var node = new TreeBoxNode(this.starTree);
+      node.setText(0, s.id);
+      node.setText(1, s.vmag.toFixed(3));
+      node.setText(2, s.ra.toFixed(4));
+   }
+
+   var hintLabel = new Label(this);
+   hintLabel.text = "Tip: Choose V=7~10 for 1~10s exposures at GAIN 120 (avoids saturation).";
+   hintLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+
+   this.selectBtn = new PushButton(this);
+   this.selectBtn.text = "Use This Star";
+   this.selectBtn.icon = this.scaledResource(":/icons/ok.png");
+   this.selectBtn.onClick = function() {
+      var sel = self.starTree.selectedNodes;
+      if (sel.length === 0) {
+         var mb = new MessageBox("Please select a star from the list.",
+            TITLE, StdIcon_Warning, StdButton_Ok);
+         mb.execute();
+         return;
+      }
+      var idx = self.starTree.childIndex(sel[0]);
+      if (idx >= 0 && idx < stars.length) {
+         self.selectedStar = stars[idx];
+         self.ok();
+      }
+   };
+
+   this.cancelButton = new PushButton(this);
+   this.cancelButton.text = "Cancel";
+   this.cancelButton.icon = this.scaledResource(":/icons/cancel.png");
+   this.cancelButton.onClick = function() { self.cancel(); };
+
+   var btnSizer = new HorizontalSizer;
+   btnSizer.spacing = 8;
+   btnSizer.addStretch();
+   btnSizer.add(this.selectBtn);
+   btnSizer.add(this.cancelButton);
+
+   this.sizer = new VerticalSizer;
+   this.sizer.margin  = 8;
+   this.sizer.spacing = 8;
+   this.sizer.add(infoLabel);
+   this.sizer.add(this.starTree, 100);
+   this.sizer.add(hintLabel);
+   this.sizer.add(btnSizer);
+
+   this.adjustToContents();
+}
+
+NearbyStarDialog.prototype = new Dialog;
+
+//============================================================================
 // Auto-stretch (MTF-based) — for image preview
 //============================================================================
 
@@ -467,8 +645,12 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
    this.__base__();
 
    var self = this;
-   this.selectedX = -1;
-   this.selectedY = -1;
+   this.selectedX    = -1;
+   this.selectedY    = -1;
+   this.selectedStar = null; // filled when catalog star is chosen
+   this.wcs          = null;
+   this.filepath     = filepath;
+   this.mode         = mode;
 
    this.windowTitle = title;
    this.minWidth    = 720;
@@ -496,10 +678,49 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
    this.coordLabel.text = "Position: (not selected)";
    this.coordLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
 
+   // "Find in Catalog" button — only shown in star mode
+   this.catalogBtn = null;
+   if (mode === "star") {
+      this.catalogBtn = new PushButton(this);
+      this.catalogBtn.text    = "Find in Catalog...";
+      this.catalogBtn.toolTip = "Query SIMBAD for stars near the clicked position";
+      this.catalogBtn.enabled = false;
+      this.catalogBtn.onClick = function() {
+         if (!self.wcs) {
+            var mb = new MessageBox(
+               "No WCS astrometric solution found in this frame.\n"
+               + "Please plate-solve the images first, or enter the star name manually.",
+               TITLE, StdIcon_Warning, StdButton_Ok);
+            mb.execute();
+            return;
+         }
+         var pos = pixelToRaDec(self.wcs, self.selectedX, self.selectedY);
+         console.writeln("SIMBAD query: RA=" + pos.ra.toFixed(4)
+            + " Dec=" + pos.dec.toFixed(4) + " radius=5'");
+         console.flush();
+         var stars = querySIMBADNearby(pos.ra, pos.dec, 5);
+         if (!stars || stars.length === 0) {
+            var mb = new MessageBox(
+               "No stars with V magnitude found within 5 arcmin.\n"
+               + "Try clicking closer to a star, or enter the star name manually.",
+               TITLE, StdIcon_Warning, StdButton_Ok);
+            mb.execute();
+            return;
+         }
+         var catalogDlg = new NearbyStarDialog(stars);
+         if (catalogDlg.execute() === 1 && catalogDlg.selectedStar) {
+            self.selectedStar = catalogDlg.selectedStar;
+            self.coordLabel.text = "Position: X=" + self.selectedX + "  Y=" + self.selectedY
+               + "   →  " + self.selectedStar.id + "  V=" + self.selectedStar.vmag.toFixed(3);
+         }
+      };
+   }
+
    this.preview.onImageClick = function(imgX, imgY) {
       self.selectedX = Math.round(imgX);
       self.selectedY = Math.round(imgY);
       self.coordLabel.text = "Position: X=" + self.selectedX + "  Y=" + self.selectedY;
+      if (self.catalogBtn) self.catalogBtn.enabled = true;
    };
 
    this.okButton = new PushButton(this);
@@ -522,6 +743,7 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
    var btnSizer = new HorizontalSizer;
    btnSizer.spacing = 8;
    btnSizer.add(this.coordLabel, 100);
+   if (this.catalogBtn) btnSizer.add(this.catalogBtn);
    btnSizer.addStretch();
    btnSizer.add(this.okButton);
    btnSizer.add(this.cancelButton);
@@ -533,15 +755,38 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
    this.sizer.add(this.preview, 100);
    this.sizer.add(btnSizer);
 
-   // Load preview bitmap
+   // Load preview bitmap + read WCS
    var wins = ImageWindow.open(filepath);
    if (wins && wins.length > 0) {
       var win   = wins[0];
       var image = win.mainView.image;
+      var kws   = win.keywords;
       console.writeln("Generating preview for: " + File.extractName(filepath));
       console.flush();
       var bmpResult = createStretchedBitmap(image, MAX_BMP_EDGE);
       this.preview.setBitmap(bmpResult);
+
+      // Try to read WCS for star mode catalog lookup
+      if (mode === "star") {
+         var crpix1 = parseFloat(getFITSKeyword(kws, "CRPIX1"));
+         var crpix2 = parseFloat(getFITSKeyword(kws, "CRPIX2"));
+         var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1"));
+         var crval2 = parseFloat(getFITSKeyword(kws, "CRVAL2"));
+         var cd11   = parseFloat(getFITSKeyword(kws, "CD1_1"));
+         var cd12   = parseFloat(getFITSKeyword(kws, "CD1_2"));
+         var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
+         var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
+         if (!isNaN(crpix1) && !isNaN(crval1) && !isNaN(cd11)) {
+            this.wcs = { crpix1: crpix1, crpix2: crpix2,
+                         crval1: crval1, crval2: crval2,
+                         cd11: cd11, cd12: cd12,
+                         cd21: cd21, cd22: cd22,
+                         imageHeight: image.height };
+            console.writeln("  WCS available — catalog lookup enabled.");
+         } else {
+            console.writeln("  No WCS found — catalog lookup unavailable.");
+         }
+      }
       win.close();
    } else {
       var mb = new MessageBox("Cannot open file:\n" + filepath, TITLE, StdIcon_Error, StdButton_Ok);
@@ -994,6 +1239,12 @@ function SkyQualityAnalyzerDialog() {
          self.starX = dlg.selectedX;
          self.starY = dlg.selectedY;
          self.starPosDisplay.text = "X=" + self.starX + "  Y=" + self.starY;
+         // Auto-fill name and V mag if a catalog star was identified
+         if (dlg.selectedStar) {
+            self.starNameEdit.text = dlg.selectedStar.id;
+            self.vmagEdit.text     = dlg.selectedStar.vmag.toFixed(3);
+            self.vmag              = dlg.selectedStar.vmag;
+         }
       }
    };
 
