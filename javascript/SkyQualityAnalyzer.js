@@ -188,6 +188,80 @@ function searchStarInfo(objectName) {
 // WCS: read keywords and convert pixel coordinates to RA/Dec
 //============================================================================
 
+// Read WCS from an XISF binary header.
+// PixInsight WBPP stores WCS as <FITSKeyword> elements inside the XISF XML header,
+// but they are NOT exposed via win.keywords. Parse the header directly.
+// imageHeight: pass image.height from the already-opened ImageWindow.
+function readXISFHeaderWCS(filepath, imageHeight) {
+   var f = new File;
+   var xml = null;
+   try {
+      f.open(filepath, FileMode_Read);
+
+      // Verify XISF signature: "XISF0100" = bytes 88,73,83,70,48,49,48,48
+      var s0 = f.read(DataType_UInt8), s1 = f.read(DataType_UInt8);
+      var s2 = f.read(DataType_UInt8), s3 = f.read(DataType_UInt8);
+      f.read(DataType_UInt8); f.read(DataType_UInt8);
+      f.read(DataType_UInt8); f.read(DataType_UInt8);
+      if (s0 !== 88 || s1 !== 73 || s2 !== 83 || s3 !== 70) {
+         f.close(); return null;
+      }
+
+      // Header length (uint32 LE, bytes 8-11)
+      var b0 = f.read(DataType_UInt8), b1 = f.read(DataType_UInt8);
+      var b2 = f.read(DataType_UInt8), b3 = f.read(DataType_UInt8);
+      var hdrLen = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+
+      // Skip 4 reserved bytes
+      f.read(DataType_UInt8); f.read(DataType_UInt8);
+      f.read(DataType_UInt8); f.read(DataType_UInt8);
+
+      // Read XML header — WCS FITSKeyword elements appear within the first ~5KB.
+      // Stop early once both CD2_2 and CRPIX2 have been seen.
+      var xmlBuf = "";
+      var readMax = Math.min(hdrLen, 16384);
+      for (var ri = 0; ri < readMax; ri++) {
+         xmlBuf += String.fromCharCode(f.read(DataType_UInt8));
+         if ((ri & 0xFF) === 0xFF &&
+             xmlBuf.indexOf("CD2_2") >= 0 && xmlBuf.indexOf("CRPIX2") >= 0) break;
+      }
+      xml = xmlBuf;
+      f.close();
+   } catch(fe) {
+      try { f.close(); } catch(e2) {}
+      return null;
+   }
+
+   if (!xml) return null;
+
+   // Extract value from <FITSKeyword name="X" value="Y" .../>
+   function extractKW(name) {
+      var tag = 'name="' + name + '" value="';
+      var idx = xml.indexOf(tag);
+      if (idx < 0) return null;
+      idx += tag.length;
+      var end = xml.indexOf('"', idx);
+      return (end >= 0) ? xml.substring(idx, end) : null;
+   }
+
+   var crpix1 = parseFloat(extractKW("CRPIX1"));
+   var crpix2 = parseFloat(extractKW("CRPIX2"));
+   var crval1 = parseFloat(extractKW("CRVAL1"));
+   var crval2 = parseFloat(extractKW("CRVAL2"));
+   var cd11   = parseFloat(extractKW("CD1_1"));
+   var cd12   = parseFloat(extractKW("CD1_2"));
+   var cd21   = parseFloat(extractKW("CD2_1"));
+   var cd22   = parseFloat(extractKW("CD2_2"));
+
+   if (isNaN(crpix1) || isNaN(crval1) || isNaN(cd11)) return null;
+
+   return { crpix1: crpix1, crpix2: crpix2,
+            crval1: crval1, crval2: crval2,
+            cd11: cd11, cd12: cd12,
+            cd21: cd21, cd22: cd22,
+            imageHeight: imageHeight };
+}
+
 // Read WCS keywords from a FITS/XISF file.
 // Returns a wcs object or null if keywords are missing.
 function readWCS(filepath) {
@@ -198,22 +272,30 @@ function readWCS(filepath) {
    var h   = win.mainView.image.height;
    win.close();
 
+   // Try standard FITS keywords first (works for plain FITS files)
    var crpix1 = parseFloat(getFITSKeyword(kws, "CRPIX1"));
    var crpix2 = parseFloat(getFITSKeyword(kws, "CRPIX2"));
-   var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1")); // RA deg
-   var crval2 = parseFloat(getFITSKeyword(kws, "CRVAL2")); // Dec deg
+   var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1"));
+   var crval2 = parseFloat(getFITSKeyword(kws, "CRVAL2"));
    var cd11   = parseFloat(getFITSKeyword(kws, "CD1_1"));
    var cd12   = parseFloat(getFITSKeyword(kws, "CD1_2"));
    var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
    var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
 
-   if (isNaN(crpix1) || isNaN(crval1) || isNaN(cd11)) return null;
+   if (!isNaN(crpix1) && !isNaN(crval1) && !isNaN(cd11)) {
+      return { crpix1: crpix1, crpix2: crpix2,
+               crval1: crval1, crval2: crval2,
+               cd11: cd11, cd12: cd12,
+               cd21: cd21, cd22: cd22,
+               imageHeight: h };
+   }
 
-   return { crpix1: crpix1, crpix2: crpix2,
-            crval1: crval1, crval2: crval2,
-            cd11: cd11, cd12: cd12,
-            cd21: cd21, cd22: cd22,
-            imageHeight: h };
+   // Fallback: XISF files from PixInsight WBPP store WCS in the binary XML header
+   if (filepath.toLowerCase().indexOf(".xisf") >= 0) {
+      return readXISFHeaderWCS(filepath, h);
+   }
+
+   return null;
 }
 
 // Convert PixInsight pixel (0-indexed, y-down) to RA/Dec using TAN projection.
@@ -768,6 +850,8 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
 
       // Try to read WCS for star mode catalog lookup
       if (mode === "star") {
+         var wcsObj = null;
+         // First try FITS keywords (plain FITS files)
          var crpix1 = parseFloat(getFITSKeyword(kws, "CRPIX1"));
          var crpix2 = parseFloat(getFITSKeyword(kws, "CRPIX2"));
          var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1"));
@@ -777,11 +861,18 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
          var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
          var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
          if (!isNaN(crpix1) && !isNaN(crval1) && !isNaN(cd11)) {
-            this.wcs = { crpix1: crpix1, crpix2: crpix2,
-                         crval1: crval1, crval2: crval2,
-                         cd11: cd11, cd12: cd12,
-                         cd21: cd21, cd22: cd22,
-                         imageHeight: image.height };
+            wcsObj = { crpix1: crpix1, crpix2: crpix2,
+                       crval1: crval1, crval2: crval2,
+                       cd11: cd11, cd12: cd12,
+                       cd21: cd21, cd22: cd22,
+                       imageHeight: image.height };
+         }
+         // Fallback: XISF files from PixInsight WBPP store WCS in binary header
+         if (!wcsObj && filepath.toLowerCase().indexOf(".xisf") >= 0) {
+            wcsObj = readXISFHeaderWCS(filepath, image.height);
+         }
+         if (wcsObj) {
+            this.wcs = wcsObj;
             console.writeln("  WCS available — catalog lookup enabled.");
          } else {
             console.writeln("  No WCS found — catalog lookup unavailable.");
