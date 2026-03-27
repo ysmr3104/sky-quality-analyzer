@@ -16,6 +16,7 @@
 #define VERSION "0.0.1"
 
 #include <pjsr/DataType.jsh>
+#include <pjsr/FileMode.jsh>
 #include <pjsr/StdIcon.jsh>
 #include <pjsr/StdButton.jsh>
 #include <pjsr/StdCursor.jsh>
@@ -28,6 +29,13 @@
 #define TITLE        "Sky Quality Analyzer"
 #define MAX_BMP_EDGE 1200
 #define BG_HALF      32    // Background ROI: 64x64 px (half = 32)
+
+// ─── Debug mode ──────────────────────────────────────────────────────────────
+// Set true during development to enable verbose console output.
+// Set false before distributing.
+var DEBUG = true;
+function dbg(msg) { if (DEBUG) console.writeln("[DBG] " + msg); }
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Script directory (used to locate equipment.json at runtime)
 var SCRIPT_PATH = #__FILE__;
@@ -103,10 +111,35 @@ function readFrameMetadata(filepath) {
    var gainStr  = getFITSKeyword(kws, "GAIN");
    var gain     = gainStr ? parseInt(gainStr) : NaN;
 
-   var isColor      = (image.numberOfChannels >= 3);
+   var isColor       = (image.numberOfChannels >= 3);
    var bitsPerSample = image.bitsPerSample;
+   var imgHeight     = image.height;
+
+   // Try WCS from keywords first
+   var crpix1 = parseFloat(getFITSKeyword(kws, "CRPIX1"));
+   var crpix2 = parseFloat(getFITSKeyword(kws, "CRPIX2"));
+   var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1"));
+   var crval2 = parseFloat(getFITSKeyword(kws, "CRVAL2"));
+   var cd11   = parseFloat(getFITSKeyword(kws, "CD1_1"));
+   var cd12   = parseFloat(getFITSKeyword(kws, "CD1_2"));
+   var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
+   var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
+   var wcs = null;
+   if (!isNaN(crpix1) && !isNaN(crval1) && !isNaN(cd11)) {
+      wcs = { crpix1: crpix1, crpix2: crpix2, crval1: crval1, crval2: crval2,
+              cd11: cd11, cd12: cd12, cd21: cd21, cd22: cd22, imageHeight: imgHeight };
+   }
 
    win.close();
+
+   // XISF fallback: win is closed above, so file is available for File API
+   if (!wcs && filepath.toLowerCase().indexOf(".xisf") >= 0) {
+      wcs = readXISFHeaderWCS(filepath, imgHeight);
+   }
+   if (wcs) {
+      console.writeln("  WCS loaded: CRPIX1=" + wcs.crpix1.toFixed(1)
+         + " CD2_2=" + wcs.cd22.toFixed(6));
+   }
 
    if (isNaN(exptime) || exptime <= 0) {
       console.warningln("EXPTIME missing or invalid in: " + File.extractName(filepath));
@@ -114,13 +147,14 @@ function readFrameMetadata(filepath) {
    }
 
    return {
-      filepath:     filepath,
-      filename:     File.extractName(filepath),
-      exptime:      exptime,
-      instrume:     instrume,
-      gain:         gain,
-      isColor:      isColor,
-      bitsPerSample: bitsPerSample
+      filepath:      filepath,
+      filename:      File.extractName(filepath),
+      exptime:       exptime,
+      instrume:      instrume,
+      gain:          gain,
+      isColor:       isColor,
+      bitsPerSample: bitsPerSample,
+      wcs:           wcs
    };
 }
 
@@ -193,41 +227,63 @@ function searchStarInfo(objectName) {
 // but they are NOT exposed via win.keywords. Parse the header directly.
 // imageHeight: pass image.height from the already-opened ImageWindow.
 function readXISFHeaderWCS(filepath, imageHeight) {
+   dbg("readXISFHeaderWCS: " + filepath);
    var xml = "";
    try {
       // Open file for reading (PixInsight PJSR File API)
-      var f = new File(filepath, FileMode_Read);
+      var f = new File;
+      f.open(filepath, FileMode_Read);
+      dbg("  file opened OK, size=" + f.size);
 
       // Read and verify XISF signature (8 bytes: "XISF0100")
       var sig = f.read(DataType_ByteArray, 8);
-      if (sig[0] !== 88 || sig[1] !== 73 || sig[2] !== 83 || sig[3] !== 70) {
+      dbg("  typeof sig=" + typeof sig + " sig.length=" + (sig ? sig.length : "null"));
+
+      // ByteArray in PJSR may use .at() instead of []
+      var b0 = (sig.at !== undefined) ? sig.at(0) : sig[0];
+      var b1 = (sig.at !== undefined) ? sig.at(1) : sig[1];
+      var b2 = (sig.at !== undefined) ? sig.at(2) : sig[2];
+      var b3 = (sig.at !== undefined) ? sig.at(3) : sig[3];
+      dbg("  sig[0..3]=" + b0 + "," + b1 + "," + b2 + "," + b3);
+      if (b0 !== 88 || b1 !== 73 || b2 !== 83 || b3 !== 70) {
+         f.close();
+         dbg("  not XISF (bad signature)");
          return null; // not XISF
       }
 
       // Read header length (uint32 LE, 4 bytes)
       var lb = f.read(DataType_ByteArray, 4);
-      var hdrLen = lb[0] | (lb[1] << 8) | (lb[2] << 16) | (lb[3] << 24);
+      var lb0 = (lb.at !== undefined) ? lb.at(0) : lb[0];
+      var lb1 = (lb.at !== undefined) ? lb.at(1) : lb[1];
+      var lb2 = (lb.at !== undefined) ? lb.at(2) : lb[2];
+      var lb3 = (lb.at !== undefined) ? lb.at(3) : lb[3];
+      var hdrLen = lb0 | (lb1 << 8) | (lb2 << 16) | (lb3 << 24);
+      dbg("  hdrLen=" + hdrLen);
 
       // Skip 4 reserved bytes
       f.read(DataType_ByteArray, 4);
 
-      // Read up to 16KB of the XML header (WCS keywords appear within first ~4KB)
-      var readLimit = Math.min(hdrLen, 16384);
+      // Read up to 32KB of the XML header (WCS keywords appear within first ~4KB)
+      var readLimit = Math.min(hdrLen, 32768);
+      dbg("  reading " + readLimit + " bytes of XML header");
       var xmlBytes = f.read(DataType_ByteArray, readLimit);
+      f.close();
+      dbg("  xmlBytes.length=" + xmlBytes.length);
 
-      // Convert ByteArray → string in 4KB chunks; stop once WCS keywords are found
-      var chunkSize = 4096;
-      for (var ci = 0; ci < readLimit; ci += chunkSize) {
-         var endIdx = Math.min(ci + chunkSize, readLimit);
-         var slice = [];
-         for (var si = ci; si < endIdx; si++) slice.push(xmlBytes[si]);
-         xml += String.fromCharCode.apply(null, slice);
-         if (xml.indexOf("CD2_2") >= 0 && xml.indexOf("CRPIX2") >= 0) break;
+      // Convert ByteArray → string byte by byte
+      for (var si = 0; si < xmlBytes.length; si++) {
+         var bv = (xmlBytes.at !== undefined) ? xmlBytes.at(si) : xmlBytes[si];
+         xml += String.fromCharCode(bv);
+         // Early stop once WCS keywords are found (avoid processing whole header)
+         if (si > 4096 && xml.indexOf("CD2_2") >= 0 && xml.indexOf("CRPIX2") >= 0) break;
       }
    } catch(e) {
+      dbg("  EXCEPTION: " + e.message);
+      console.writeln("[SQM] readXISFHeaderWCS failed: " + e.message);
       return null;
    }
 
+   dbg("  xml length=" + xml.length + " CD2_2=" + (xml.indexOf("CD2_2")>=0) + " CRPIX1=" + (xml.indexOf("CRPIX1")>=0));
    if (!xml) return null;
 
    // Extract value attribute from <FITSKeyword name="X" value="Y" .../>
@@ -249,8 +305,13 @@ function readXISFHeaderWCS(filepath, imageHeight) {
    var cd21   = parseFloat(extractKW("CD2_1"));
    var cd22   = parseFloat(extractKW("CD2_2"));
 
-   if (isNaN(crpix1) || isNaN(crval1) || isNaN(cd11)) return null;
+   dbg("  extracted: CRPIX1=" + crpix1 + " CRVAL1=" + crval1 + " CD1_1=" + cd11);
+   if (isNaN(crpix1) || isNaN(crval1) || isNaN(cd11)) {
+      dbg("  WCS extraction failed (NaN values)");
+      return null;
+   }
 
+   dbg("  XISF WCS OK");
    return { crpix1: crpix1, crpix2: crpix2,
             crval1: crval1, crval2: crval2,
             cd11: cd11, cd12: cd12,
@@ -261,11 +322,13 @@ function readXISFHeaderWCS(filepath, imageHeight) {
 // Read WCS keywords from a FITS/XISF file.
 // Returns a wcs object or null if keywords are missing.
 function readWCS(filepath) {
+   dbg("readWCS: " + File.extractName(filepath));
    var wins = ImageWindow.open(filepath);
-   if (!wins || wins.length === 0) return null;
+   if (!wins || wins.length === 0) { dbg("  ImageWindow.open failed"); return null; }
    var win = wins[0];
    var kws = win.keywords;
    var h   = win.mainView.image.height;
+   dbg("  keywords count=" + kws.length + " imageHeight=" + h);
    win.close();
 
    // Try standard FITS keywords first (works for plain FITS files)
@@ -277,8 +340,10 @@ function readWCS(filepath) {
    var cd12   = parseFloat(getFITSKeyword(kws, "CD1_2"));
    var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
    var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
+   dbg("  FITS kw: CRPIX1=" + crpix1 + " CRVAL1=" + crval1 + " CD1_1=" + cd11);
 
    if (!isNaN(crpix1) && !isNaN(crval1) && !isNaN(cd11)) {
+      dbg("  WCS found in win.keywords");
       return { crpix1: crpix1, crpix2: crpix2,
                crval1: crval1, crval2: crval2,
                cd11: cd11, cd12: cd12,
@@ -288,6 +353,7 @@ function readWCS(filepath) {
 
    // Fallback: XISF files from PixInsight WBPP store WCS in the binary XML header
    if (filepath.toLowerCase().indexOf(".xisf") >= 0) {
+      dbg("  falling back to XISF binary header parse");
       return readXISFHeaderWCS(filepath, h);
    }
 
@@ -311,42 +377,73 @@ function pixelToRaDec(wcs, px, py) {
    return { ra: ra, dec: dec };
 }
 
+// Inverse: RA/Dec → PixInsight pixel (0-indexed, y-down).
+// Returns { px, py } or null if the CD matrix is singular.
+function raDecToPixel(wcs, ra, dec) {
+   var dec0 = wcs.crval2 * Math.PI / 180.0;
+   var xi   = (ra - wcs.crval1) * Math.cos(dec0);
+   var eta  = dec - wcs.crval2;
+   // Invert CD matrix: [dx, dy] = CD^-1 * [xi, eta]
+   var det = wcs.cd11 * wcs.cd22 - wcs.cd12 * wcs.cd21;
+   if (Math.abs(det) < 1e-20) return null;
+   var dx = ( wcs.cd22 * xi - wcs.cd12 * eta) / det;
+   var dy = (-wcs.cd21 * xi + wcs.cd11 * eta) / det;
+   var fitsX = dx + wcs.crpix1;
+   var fitsY = dy + wcs.crpix2;
+   // Convert FITS (1-indexed, y-up) → PixInsight (0-indexed, y-down)
+   var px = Math.round(fitsX - 1.0);
+   var py = Math.round(wcs.imageHeight - fitsY);
+   return { px: px, py: py };
+}
+
 //============================================================================
 // SIMBAD catalog query by position
 //============================================================================
 
-// Query SIMBAD for stars with V magnitude near (ra, dec).
+// Query SIMBAD TAP service for stars with V magnitude near (ra, dec).
+// Uses ADQL via the TAP sync endpoint — more reliable than the script interface.
 // Returns array of { id, ra, dec, vmag } sorted by V magnitude, or null on error.
 function querySIMBADNearby(ra, dec, radiusArcmin) {
-   var script = "output console=off script=off\n"
-              + "format object \"%IDLIST(1)|%COO(d,A)|%COO(d,D)|%FLUX(V)\"\n"
-              + "query around " + ra.toFixed(6) + " "
-              + (dec >= 0 ? "+" : "") + dec.toFixed(6)
-              + " radius=" + radiusArcmin.toFixed(1) + "m\n";
+   var radiusDeg = radiusArcmin / 60.0;
+   // Filter V < 9 to prioritize bright stars suitable for SQM (need high SNR).
+   // If no results found, caller can retry with a wider/fainter query.
+   var adql = "SELECT TOP 30 main_id, ra, dec, V "
+            + "FROM basic JOIN allfluxes ON oid = oidref "
+            + "WHERE CONTAINS(POINT('ICRS',ra,dec),"
+            +   "CIRCLE('ICRS'," + ra.toFixed(6) + "," + dec.toFixed(6) + "," + radiusDeg.toFixed(6) + "))=1 "
+            + "AND V IS NOT NULL "
+            + "AND V < 9.0 "
+            + "ORDER BY V";
 
-   var scriptFile = File.systemTempDirectory + "/sqm_simbad_script.txt";
-   var outFile    = File.systemTempDirectory + "/sqm_simbad_out.txt";
-   File.writeTextFile(scriptFile, script);
+   var outFile = File.systemTempDirectory + "/sqm_simbad_out.txt";
+   var url = "http://simbad.u-strasbg.fr/simbad/sim-tap/sync"
+           + "?REQUEST=doQuery&LANG=ADQL&FORMAT=text&QUERY="
+           + encodeURIComponent(adql);
+   dbg("SIMBAD TAP URL: " + url);
 
    var P = new ExternalProcess;
-   P.start("curl", ["-s", "-o", outFile, "-m", "20",
-      "--data-urlencode", "script@" + scriptFile,
-      "http://simbad.u-strasbg.fr/simbad/sim-script"]);
-   if (!P.waitForFinished(25000)) { P.kill(); return null; }
-   try { File.remove(scriptFile); } catch (e) {}
+   P.start("curl", ["-s", "-o", outFile, "-m", "30", url]);
+   if (!P.waitForFinished(35000)) { P.kill(); return null; }
    if (!File.exists(outFile)) return null;
 
    var content = "";
    try { content = File.readTextFile(outFile); File.remove(outFile); } catch (e) {}
 
+   dbg("SIMBAD response (" + content.length + " chars):\n" + content.substring(0, 800));
+   return parseSIMBADResponse(content);
+}
+
+// Parse SIMBAD TAP text/plain response (pipe-separated) into array of { id, ra, dec, vmag }.
+function parseSIMBADResponse(content) {
    var stars = [];
    var lines = content.split("\n");
    for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
-      if (line.length === 0 || line.charAt(0) === ":" || line.charAt(0) === "#") continue;
+      if (line.length === 0) continue;
+      if (line.charAt(0) === "-" || line.indexOf("main_id") >= 0) continue; // header/separator
       var parts = line.split("|");
       if (parts.length < 4) continue;
-      var id   = parts[0].trim();
+      var id   = parts[0].trim().replace(/^"|"$/g, "");
       var sra  = parseFloat(parts[1]);
       var sdec = parseFloat(parts[2]);
       var vmag = parseFloat(parts[3]);
@@ -354,15 +451,46 @@ function querySIMBADNearby(ra, dec, radiusArcmin) {
          stars.push({ id: id, ra: sra, dec: sdec, vmag: vmag });
       }
    }
+   dbg("SIMBAD: " + stars.length + " stars with Vmag");
    stars.sort(function(a, b) { return a.vmag - b.vmag; });
    return stars;
+}
+
+//============================================================================
+// starSuitabilityLabel — compute suitability label for a reference star
+// aperture: px radius; pixelScale: arcsec/px (0 = unknown)
+//============================================================================
+
+function starSuitabilityLabel(vmag, aperture, pixelScale) {
+   // Saturation risk: very bright stars may saturate even in shortest exposures.
+   if (vmag < 1.5) return "Saturation risk";
+
+   if (pixelScale > 0) {
+      // Compute sky-noise-relative SNR proxy.
+      // Assumes suburban/urban sky SQM = 16 mag/arcsec^2 (conservative estimate).
+      // SNR_proxy = star_flux / sky_flux_in_aperture
+      //           = 10^(0.4*(16-V)) / (pi * r_arcsec^2)
+      var r_arcsec = aperture * pixelScale;
+      var area = Math.PI * r_arcsec * r_arcsec;
+      var snrProxy = Math.pow(10, 0.4 * (16.0 - vmag)) / area;
+      if (snrProxy >= 20) return "Ideal";
+      if (snrProxy >= 5)  return "Good";
+      if (snrProxy >= 1)  return "Marginal";
+      return "Too faint";
+   } else {
+      // Fallback: vmag-only thresholds.
+      if (vmag <= 7.0)  return "Ideal";
+      if (vmag <= 9.0)  return "Good";
+      if (vmag <= 10.0) return "Marginal";
+      return "Too faint";
+   }
 }
 
 //============================================================================
 // NearbyStarDialog — show SIMBAD results, user picks a star
 //============================================================================
 
-function NearbyStarDialog(stars) {
+function NearbyStarDialog(stars, aperture, pixelScale) {
    this.__base__ = Dialog;
    this.__base__();
 
@@ -375,15 +503,20 @@ function NearbyStarDialog(stars) {
    infoLabel.text = "Stars near the clicked position (sorted by V magnitude):";
    infoLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
 
+   var ap = (aperture > 0) ? aperture : 15;
+   var ps = (pixelScale > 0) ? pixelScale : 0;
+
    this.starTree = new TreeBox(this);
    this.starTree.headerVisible   = true;
-   this.starTree.numberOfColumns = 3;
-   this.starTree.setColumnWidth(0, 260);
-   this.starTree.setColumnWidth(1, 70);
-   this.starTree.setColumnWidth(2, 100);
+   this.starTree.numberOfColumns = 4;
+   this.starTree.setColumnWidth(0, 220);
+   this.starTree.setColumnWidth(1, 65);
+   this.starTree.setColumnWidth(2, 90);
+   this.starTree.setColumnWidth(3, 120);
    this.starTree.setHeaderText(0, "Identifier");
    this.starTree.setHeaderText(1, "V mag");
    this.starTree.setHeaderText(2, "RA (deg)");
+   this.starTree.setHeaderText(3, "Suitability");
    this.starTree.minHeight = 220;
 
    for (var i = 0; i < stars.length; i++) {
@@ -392,10 +525,18 @@ function NearbyStarDialog(stars) {
       node.setText(0, s.id);
       node.setText(1, s.vmag.toFixed(3));
       node.setText(2, s.ra.toFixed(4));
+      node.setText(3, starSuitabilityLabel(s.vmag, ap, ps));
    }
 
+   // Compose hint showing aperture and pixel scale used for suitability evaluation.
    var hintLabel = new Label(this);
-   hintLabel.text = "Tip: Choose V=7~10 for 1~10s exposures at GAIN 120 (avoids saturation).";
+   if (ps > 0) {
+      var rArcsec = (ap * ps).toFixed(1);
+      hintLabel.text = "Suitability based on aperture r=" + rArcsec + "\" (r=" + ap
+         + "px, scale=" + ps.toFixed(2) + "\"/px, assumes SQM=16). Ideal: V<3, Good: V<4.";
+   } else {
+      hintLabel.text = "Suitability based on V magnitude only (select camera/telescope for aperture-based estimate).";
+   }
    hintLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
 
    this.selectBtn = new PushButton(this);
@@ -718,7 +859,7 @@ PointPreviewControl.prototype.fitToWindow = function() {
 // PointSelectionDialog — show a frame preview and let user click a position
 //============================================================================
 
-function PointSelectionDialog(parent, title, filepath, mode, aperture) {
+function PointSelectionDialog(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
    this.__base__ = Dialog;
    this.__base__();
 
@@ -726,7 +867,8 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
    this.selectedX    = -1;
    this.selectedY    = -1;
    this.selectedStar = null; // filled when catalog star is chosen
-   this.wcs          = null;
+   this.wcs          = preloadedWcs || null; // WCS pre-loaded by caller (avoids re-reading locked file)
+   this.pixelScale   = (pixelScale > 0) ? pixelScale : 0;
    this.filepath     = filepath;
    this.mode         = mode;
 
@@ -773,21 +915,82 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
             return;
          }
          var pos = pixelToRaDec(self.wcs, self.selectedX, self.selectedY);
+         // Search 120' (2°) radius for V < 9 to find bright reference stars across the whole image.
+         // Fall back to V < 11 if nothing bright is found.
          console.writeln("SIMBAD query: RA=" + pos.ra.toFixed(4)
-            + " Dec=" + pos.dec.toFixed(4) + " radius=5'");
+            + " Dec=" + pos.dec.toFixed(4) + " radius=120' V<9");
          console.flush();
-         var stars = querySIMBADNearby(pos.ra, pos.dec, 5);
+         var stars = querySIMBADNearby(pos.ra, pos.dec, 120);
+         if (!stars || stars.length === 0) {
+            // Retry with fainter limit
+            console.writeln("  No V<9 stars found, retrying V<11...");
+            var adqlFaint = "SELECT TOP 30 main_id, ra, dec, V "
+               + "FROM basic JOIN allfluxes ON oid = oidref "
+               + "WHERE CONTAINS(POINT('ICRS',ra,dec),"
+               +   "CIRCLE('ICRS'," + pos.ra.toFixed(6) + "," + pos.dec.toFixed(6) + ",2.0))=1 "
+               + "AND V IS NOT NULL AND V < 11.0 ORDER BY V";
+            var outFile2 = File.systemTempDirectory + "/sqm_simbad_faint.txt";
+            var url2 = "http://simbad.u-strasbg.fr/simbad/sim-tap/sync"
+               + "?REQUEST=doQuery&LANG=ADQL&FORMAT=text&QUERY=" + encodeURIComponent(adqlFaint);
+            var P2 = new ExternalProcess;
+            P2.start("curl", ["-s", "-o", outFile2, "-m", "30", url2]);
+            if (P2.waitForFinished(35000) && File.exists(outFile2)) {
+               var content2 = File.readTextFile(outFile2);
+               File.remove(outFile2);
+               stars = parseSIMBADResponse(content2);
+            }
+         }
          if (!stars || stars.length === 0) {
             var mb = new MessageBox(
-               "No stars with V magnitude found within 5 arcmin.\n"
-               + "Try clicking closer to a star, or enter the star name manually.",
+               "No stars with V < 11 found within 2° of the clicked position.\n"
+               + "This field may not contain a bright enough reference star.\n"
+               + "Try entering star name and V magnitude manually, or\n"
+               + "capture frames covering a brighter star (V < 8 recommended).",
                TITLE, StdIcon_Warning, StdButton_Ok);
             mb.execute();
             return;
          }
-         var catalogDlg = new NearbyStarDialog(stars);
+         // Filter to stars that project within the image bounds.
+         var imgW2   = self.imgWidth  || 0;
+         var imgH2   = self.wcs ? self.wcs.imageHeight : 0;
+         var inFrame = [];
+         for (var si = 0; si < stars.length; si++) {
+            var fp2 = raDecToPixel(self.wcs, stars[si].ra, stars[si].dec);
+            if (!fp2) continue;
+            if (imgW2 > 0 && (fp2.px < 0 || fp2.px >= imgW2)) continue;
+            if (imgH2 > 0 && (fp2.py < 0 || fp2.py >= imgH2)) continue;
+            stars[si].px = fp2.px;
+            stars[si].py = fp2.py;
+            inFrame.push(stars[si]);
+         }
+         if (inFrame.length === 0) {
+            var mb = new MessageBox(
+               "No suitable stars found within the image frame.\n"
+               + "The bright stars in this field may all lie outside the image bounds.\n"
+               + "Try entering the star name and V magnitude manually.",
+               TITLE, StdIcon_Warning, StdButton_Ok);
+            mb.execute();
+            return;
+         }
+         var catalogDlg = new NearbyStarDialog(inFrame, self.preview.aperture, self.pixelScale);
          if (catalogDlg.execute() === 1 && catalogDlg.selectedStar) {
             self.selectedStar = catalogDlg.selectedStar;
+            // Update pixel position to the actual projected position of the catalog star
+            if (self.wcs) {
+               console.writeln("  WCS: CRPIX1=" + self.wcs.crpix1.toFixed(2)
+                  + " CRPIX2=" + self.wcs.crpix2.toFixed(2)
+                  + " CD2_2=" + self.wcs.cd22.toFixed(7));
+               console.writeln("  Star RA=" + self.selectedStar.ra.toFixed(4)
+                  + " Dec=" + self.selectedStar.dec.toFixed(4));
+               var fp = raDecToPixel(self.wcs, self.selectedStar.ra, self.selectedStar.dec);
+               if (fp) {
+                  self.selectedX = fp.px;
+                  self.selectedY = fp.py;
+                  console.writeln("  Catalog star projected to pixel: (" + self.selectedX + "," + self.selectedY + ")");
+               } else {
+                  console.writeln("  [WARN] raDecToPixel returned null (singular CD matrix?)");
+               }
+            }
             self.coordLabel.text = "Position: X=" + self.selectedX + "  Y=" + self.selectedY
                + "   →  " + self.selectedStar.id + "  V=" + self.selectedStar.vmag.toFixed(3);
          }
@@ -836,42 +1039,54 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture) {
    // Load preview bitmap + read WCS
    var wins = ImageWindow.open(filepath);
    if (wins && wins.length > 0) {
-      var win   = wins[0];
-      var image = win.mainView.image;
-      var kws   = win.keywords;
+      var win        = wins[0];
+      var image      = win.mainView.image;
+      var imgH       = image.height; // save before win.close()
+      var imgW       = image.width;
+      this.imgWidth  = imgW;         // used for out-of-frame check in catalog lookup
+      var kws        = win.keywords;
       console.writeln("Generating preview for: " + File.extractName(filepath));
       console.flush();
       var bmpResult = createStretchedBitmap(image, MAX_BMP_EDGE);
       this.preview.setBitmap(bmpResult);
 
-      // Try to read WCS for star mode catalog lookup
+      // WCS for catalog lookup: use pre-loaded WCS passed by caller.
+      // If not available, try FITS keywords or XISF binary header (close win FIRST to release file lock).
       if (mode === "star") {
-         var wcsObj = null;
-         // First try FITS keywords (plain FITS files)
-         var crpix1 = parseFloat(getFITSKeyword(kws, "CRPIX1"));
-         var crpix2 = parseFloat(getFITSKeyword(kws, "CRPIX2"));
-         var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1"));
-         var crval2 = parseFloat(getFITSKeyword(kws, "CRVAL2"));
-         var cd11   = parseFloat(getFITSKeyword(kws, "CD1_1"));
-         var cd12   = parseFloat(getFITSKeyword(kws, "CD1_2"));
-         var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
-         var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
-         if (!isNaN(crpix1) && !isNaN(crval1) && !isNaN(cd11)) {
-            wcsObj = { crpix1: crpix1, crpix2: crpix2,
-                       crval1: crval1, crval2: crval2,
-                       cd11: cd11, cd12: cd12,
-                       cd21: cd21, cd22: cd22,
-                       imageHeight: image.height };
-         }
-         // Fallback: XISF files from PixInsight WBPP store WCS in binary header
-         if (!wcsObj && filepath.toLowerCase().indexOf(".xisf") >= 0) {
-            wcsObj = readXISFHeaderWCS(filepath, image.height);
-         }
-         if (wcsObj) {
-            this.wcs = wcsObj;
+         if (this.wcs) {
             console.writeln("  WCS available — catalog lookup enabled.");
+            console.writeln("  CRPIX1=" + this.wcs.crpix1 + " CRPIX2=" + this.wcs.crpix2
+               + " CRVAL1=" + this.wcs.crval1 + " CRVAL2=" + this.wcs.crval2);
+            console.writeln("  CD1_1=" + this.wcs.cd11 + " CD2_2=" + this.wcs.cd22);
          } else {
-            console.writeln("  No WCS found — catalog lookup unavailable.");
+            // No pre-loaded WCS: try FITS keywords
+            var wcsObj = null;
+            var crpix1k = parseFloat(getFITSKeyword(kws, "CRPIX1"));
+            var crpix2k = parseFloat(getFITSKeyword(kws, "CRPIX2"));
+            var crval1k = parseFloat(getFITSKeyword(kws, "CRVAL1"));
+            var crval2k = parseFloat(getFITSKeyword(kws, "CRVAL2"));
+            var cd11k   = parseFloat(getFITSKeyword(kws, "CD1_1"));
+            var cd12k   = parseFloat(getFITSKeyword(kws, "CD1_2"));
+            var cd21k   = parseFloat(getFITSKeyword(kws, "CD2_1"));
+            var cd22k   = parseFloat(getFITSKeyword(kws, "CD2_2"));
+            if (!isNaN(crpix1k) && !isNaN(crval1k) && !isNaN(cd11k)) {
+               wcsObj = { crpix1: crpix1k, crpix2: crpix2k,
+                          crval1: crval1k, crval2: crval2k,
+                          cd11: cd11k, cd12: cd12k,
+                          cd21: cd21k, cd22: cd22k,
+                          imageHeight: imgH };
+            }
+            win.close(); // release file lock BEFORE trying XISF binary read
+            if (!wcsObj && filepath.toLowerCase().indexOf(".xisf") >= 0) {
+               wcsObj = readXISFHeaderWCS(filepath, imgH);
+            }
+            if (wcsObj) {
+               this.wcs = wcsObj;
+               console.writeln("  WCS available — catalog lookup enabled.");
+            } else {
+               console.writeln("  No WCS found — catalog lookup unavailable.");
+            }
+            return; // win already closed above
          }
       }
       win.close();
@@ -982,25 +1197,51 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
 function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry, telescopeEntry) {
    if (!cameraEntry || !telescopeEntry) return null;
 
-   var pixelScale   = computePixelScale(cameraEntry.pixel_pitch, telescopeEntry.focal_length, 1);
-   var sqmChannel   = cameraEntry.sqm_channel || "G";
+   var pixelScale    = computePixelScale(cameraEntry.pixel_pitch, telescopeEntry.focal_length, 1);
+   var sqmChannel    = cameraEntry.sqm_channel || "G";
    var bitsPerSample = frames[0].bitsPerSample;
+
+   // Find a reference WCS (first solved frame) to get star RA/Dec
+   var refWcs = null;
+   for (var ri = 0; ri < frames.length; ri++) {
+      if (frames[ri].wcs) { refWcs = frames[ri].wcs; break; }
+   }
+   var starRaDec = null;
+   if (refWcs) {
+      starRaDec = pixelToRaDec(refWcs, starX, starY);
+      dbg("runAnalysis: star RA=" + starRaDec.ra.toFixed(4) + " Dec=" + starRaDec.dec.toFixed(4));
+   }
 
    var skyFrameData  = [];
    var starFrameData = [];
 
    for (var i = 0; i < frames.length; i++) {
       var f  = frames[i];
+
+      // Per-frame star position via WCS if available, else fall back to fixed coords
+      var fStarX = starX;
+      var fStarY = starY;
+      if (starRaDec && f.wcs) {
+         var fp = raDecToPixel(f.wcs, starRaDec.ra, starRaDec.dec);
+         if (fp) {
+            fStarX = fp.px;
+            fStarY = fp.py;
+            dbg("  frame " + f.filename + " star transformed: (" + fStarX + "," + fStarY + ")");
+         }
+      } else if (!f.wcs) {
+         console.writeln("  [WARN] No WCS for " + f.filename + " — using fixed star coords");
+      }
+
       var bg = measureBackground(f.filepath, bgX, bgY, bitsPerSample, sqmChannel);
-      var ap = aperturePhotometry(f.filepath, starX, starY, aperture, bitsPerSample, sqmChannel);
+      var ap = aperturePhotometry(f.filepath, fStarX, fStarY, aperture, bitsPerSample, sqmChannel);
 
       if (!bg || !ap) {
          console.warningln("Skipping frame (measurement failed): " + f.filename);
          continue;
       }
 
-      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU",
-         f.filename, f.exptime, bg.adu_sky, ap.adu_star));
+      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  starXY=(%d,%d)",
+         f.filename, f.exptime, bg.adu_sky, ap.adu_star, fStarX, fStarY));
 
       skyFrameData.push({ exptime: f.exptime, adu_sky:  bg.adu_sky  });
       starFrameData.push({ exptime: f.exptime, adu_star: ap.adu_star });
@@ -1278,15 +1519,20 @@ function SkyQualityAnalyzerDialog() {
 
    var bgSelectBtn = new PushButton(measureGroupBox);
    bgSelectBtn.text    = "Select Region...";
-   bgSelectBtn.toolTip = "Click on a star-free background region in the first frame";
+   bgSelectBtn.toolTip = "Click on a star-free background region (longest-exposure frame shown)";
    bgSelectBtn.onClick = function() {
       if (self.frames.length === 0) {
          var mb = new MessageBox("Please add frames first.", TITLE, StdIcon_Warning, StdButton_Ok);
          mb.execute();
          return;
       }
+      // Use longest-exposure frame so faint background structure is visible
+      var bgFrame = self.frames[0];
+      for (var fi = 0; fi < self.frames.length; fi++) {
+         if (self.frames[fi].exptime > bgFrame.exptime) bgFrame = self.frames[fi];
+      }
       var dlg = new PointSelectionDialog(self, "Select Background Region",
-         self.frames[0].filepath, "background", 0);
+         bgFrame.filepath, "background", 0);
       if (dlg.execute() === 1) {
          self.bgX = dlg.selectedX;
          self.bgY = dlg.selectedY;
@@ -1320,14 +1566,24 @@ function SkyQualityAnalyzerDialog() {
          return;
       }
       var ap = self.apertureSpinBox.value;
-      // Prefer a frame that has WCS keywords for catalog lookup
+      // Compute current pixel scale from selected equipment for NearbyStarDialog suitability column.
+      var currentPs = 0;
+      var ci = self.cameraCombo.currentItem;
+      var ti = self.teleCombo.currentItem;
+      if (ci >= 0 && ti >= 0 && ci < gEquipment.cameras.length && ti < gEquipment.telescopes.length) {
+         var camE  = gEquipment.cameras[ci];
+         var teleE = gEquipment.telescopes[ti];
+         if (camE.pixel_pitch > 0 && teleE.focal_length > 0) {
+            currentPs = computePixelScale(camE.pixel_pitch, teleE.focal_length, 1);
+         }
+      }
+      // Use pre-loaded WCS from readFrameMetadata (avoids re-opening files)
       var previewFrame = self.frames[0];
       for (var fi = 0; fi < self.frames.length; fi++) {
-         var testWcs = readWCS(self.frames[fi].filepath);
-         if (testWcs !== null) { previewFrame = self.frames[fi]; break; }
+         if (self.frames[fi].wcs) { previewFrame = self.frames[fi]; break; }
       }
       var dlg = new PointSelectionDialog(self, "Select Reference Star",
-         previewFrame.filepath, "star", ap);
+         previewFrame.filepath, "star", ap, previewFrame.wcs, currentPs);
       if (dlg.execute() === 1) {
          self.starX = dlg.selectedX;
          self.starY = dlg.selectedY;
