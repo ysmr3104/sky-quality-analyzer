@@ -1517,7 +1517,7 @@ function SkyQualityAnalyzerDialog() {
 
    var bgSelectBtn = new PushButton(measureGroupBox);
    bgSelectBtn.text    = "Select Region...";
-   bgSelectBtn.setFixedWidth(120);
+   bgSelectBtn.setFixedWidth(130);
    bgSelectBtn.toolTip = "Click on a star-free background region (longest-exposure frame shown)";
    bgSelectBtn.onClick = function() {
       if (self.frames.length === 0) {
@@ -1557,7 +1557,7 @@ function SkyQualityAnalyzerDialog() {
 
    var starSelectBtn = new PushButton(measureGroupBox);
    starSelectBtn.text    = "Select Star...";
-   starSelectBtn.setFixedWidth(120);
+   starSelectBtn.setFixedWidth(130);
    starSelectBtn.toolTip = "Click on the reference star in the first frame";
    starSelectBtn.onClick = function() {
       if (self.frames.length === 0) {
@@ -1649,6 +1649,7 @@ function SkyQualityAnalyzerDialog() {
 
    var searchBtn = new PushButton(starGroupBox);
    searchBtn.text    = "Search";
+   searchBtn.setFixedWidth(130);
    searchBtn.toolTip = "Search star V magnitude via CDS Sesame";
    searchBtn.onClick = function() {
       var name = self.starNameEdit.text.trim();
