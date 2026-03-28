@@ -34,10 +34,17 @@ test("readFrameMetadata: WCS present in 1s frame", function() {
 // ============================================================
 // Round-trip: pixel → RA/Dec → pixel (CRPIX should map to CRVAL)
 // ============================================================
+// CRPIX is a FITS 1-indexed coordinate.
+// PixInsight pixel corresponding to CRPIX:
+//   px_pi = crpix1 - 1          (x: FITS 1-indexed → PixInsight 0-indexed)
+//   py_pi = imageHeight - crpix2 (y: FITS y-up → PixInsight y-down)
 test("pixelToRaDec(CRPIX) returns CRVAL", function() {
     assertTrue(wcs !== null, "WCS not loaded (previous test failed)");
-    var pos = pixelToRaDec(wcs, wcs.crpix1, wcs.crpix2);
+    var crPixPx = wcs.crpix1 - 1;
+    var crPixPy = wcs.imageHeight - wcs.crpix2;
+    var pos = pixelToRaDec(wcs, crPixPx, crPixPy);
     assertTrue(pos !== null, "pixelToRaDec returned null");
+    console.writeln("  CRPIX in PI coords: px=" + crPixPx.toFixed(1) + " py=" + crPixPy.toFixed(1));
     console.writeln("  pixelToRaDec(CRPIX): RA=" + pos.ra.toFixed(4) + " Dec=" + pos.dec.toFixed(4));
     assertEqual(pos.ra,  wcs.crval1, "RA at CRPIX should equal CRVAL1",  0.01);
     assertEqual(pos.dec, wcs.crval2, "Dec at CRPIX should equal CRVAL2", 0.01);
@@ -48,8 +55,12 @@ test("raDecToPixel(CRVAL) returns CRPIX", function() {
     var px = raDecToPixel(wcs, wcs.crval1, wcs.crval2);
     assertTrue(px !== null, "raDecToPixel returned null");
     console.writeln("  raDecToPixel(CRVAL): px=" + px.px.toFixed(1) + " py=" + px.py.toFixed(1));
-    assertEqual(px.px, wcs.crpix1, "px at CRVAL should equal CRPIX1", 1.0);
-    assertEqual(px.py, wcs.crpix2, "py at CRVAL should equal CRPIX2", 1.0);
+    // Expected PixInsight pixel for CRPIX:
+    //   px_expected = round(crpix1 - 1),  py_expected = round(imageHeight - crpix2)
+    var expPx = Math.round(wcs.crpix1 - 1);
+    var expPy = Math.round(wcs.imageHeight - wcs.crpix2);
+    assertEqual(px.px, expPx, "px at CRVAL should equal CRPIX1 - 1", 1.0);
+    assertEqual(px.py, expPy, "py at CRVAL should equal imageHeight - CRPIX2", 1.0);
 });
 
 // ============================================================

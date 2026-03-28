@@ -4,3 +4,7 @@
 
 # テスト用画像フィクスチャ（大容量のため除外、後でクロップ版に差し替え予定）
 tests/fixtures/xisf/
+
+# PJSR テスト結果（実行時生成）
+tests/pjsr/results/
+tests/pjsr/results*.log
