@@ -1325,7 +1325,7 @@ function SkyQualityAnalyzerDialog() {
    this.sqmResult = null;         // Last analysis result
 
    this.windowTitle = TITLE + " v" + VERSION;
-   this.minWidth    = 640;
+   this.minWidth    = 720;
 
    // =====================================================
    // Title
