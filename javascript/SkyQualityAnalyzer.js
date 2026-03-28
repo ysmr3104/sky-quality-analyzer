@@ -1345,13 +1345,15 @@ function SkyQualityAnalyzerDialog() {
 
    this.frameTree = new TreeBox(framesGroupBox);
    this.frameTree.headerVisible  = true;
-   this.frameTree.numberOfColumns = 3;
+   this.frameTree.numberOfColumns = 4;
    this.frameTree.setColumnWidth(0, 320);
    this.frameTree.setColumnWidth(1, 80);
    this.frameTree.setColumnWidth(2, 80);
+   this.frameTree.setColumnWidth(3, 50);
    this.frameTree.setHeaderText(0, "Filename");
    this.frameTree.setHeaderText(1, "Exp (s)");
    this.frameTree.setHeaderText(2, "Color");
+   this.frameTree.setHeaderText(3, "WCS");
    this.frameTree.setMinHeight(120);
    this.frameTree.toolTip = "List of FITS frames to analyze";
 
@@ -1828,6 +1830,7 @@ SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function() {
       node.setText(0, f.filename);
       node.setText(1, f.exptime.toFixed(3));
       node.setText(2, f.isColor ? "Color" : "Mono");
+      node.setText(3, f.wcs ? "Yes" : "\u2014");
    }
 };
 
