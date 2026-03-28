@@ -263,8 +263,8 @@ function readXISFHeaderWCS(filepath, imageHeight) {
       // Skip 4 reserved bytes
       f.read(DataType_ByteArray, 4);
 
-      // Read up to 32KB of the XML header (WCS keywords appear within first ~4KB)
-      var readLimit = Math.min(hdrLen, 32768);
+      // Read the full XML header (WCS keywords may appear anywhere in the header)
+      var readLimit = hdrLen;
       dbg("  reading " + readLimit + " bytes of XML header");
       var xmlBytes = f.read(DataType_ByteArray, readLimit);
       f.close();
