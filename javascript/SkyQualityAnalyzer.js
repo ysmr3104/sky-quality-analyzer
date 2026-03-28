@@ -1331,13 +1331,14 @@ function SkyQualityAnalyzerDialog() {
    // Title
    // =====================================================
    var titleLabel = new Label(this);
-   titleLabel.text = "<b>" + TITLE + "</b>  —  Reference Star Method";
+   titleLabel.text = TITLE + "  —  Reference Star Method";
    titleLabel.textAlignment = TextAlign_Center | TextAlign_VertCenter;
 
    // =====================================================
    // Section 1: Frames
    // =====================================================
-   var framesGroupBox = new GroupBox(this);
+   this.framesGroupBox = new GroupBox(this);
+   var framesGroupBox = this.framesGroupBox;
    framesGroupBox.title = "1. Frames (WBPP calibrated/debayered)";
    framesGroupBox.sizer = new VerticalSizer;
    framesGroupBox.sizer.margin  = 8;
@@ -1499,7 +1500,8 @@ function SkyQualityAnalyzerDialog() {
    // =====================================================
    // Section 3: Measurement Settings
    // =====================================================
-   var measureGroupBox = new GroupBox(this);
+   this.measureGroupBox = new GroupBox(this);
+   var measureGroupBox = this.measureGroupBox;
    measureGroupBox.title = "3. Measurement Settings";
    measureGroupBox.sizer = new VerticalSizer;
    measureGroupBox.sizer.margin  = 8;
@@ -1535,6 +1537,7 @@ function SkyQualityAnalyzerDialog() {
          self.bgX = dlg.selectedX;
          self.bgY = dlg.selectedY;
          self.bgPosLabel.text = "X=" + self.bgX + "  Y=" + self.bgY + "  (64×64 px region)";
+         self.updateUI();
       }
    };
 
@@ -1592,6 +1595,7 @@ function SkyQualityAnalyzerDialog() {
             self.vmagEdit.text     = dlg.selectedStar.vmag.toFixed(3);
             self.vmag              = dlg.selectedStar.vmag;
          }
+         self.updateUI();
       }
    };
 
@@ -1631,7 +1635,8 @@ function SkyQualityAnalyzerDialog() {
    // =====================================================
    // Section 4: Reference Star
    // =====================================================
-   var starGroupBox = new GroupBox(this);
+   this.starGroupBox = new GroupBox(this);
+   var starGroupBox = this.starGroupBox;
    starGroupBox.title = "4. Reference Star Magnitude";
    starGroupBox.sizer = new VerticalSizer;
    starGroupBox.sizer.margin  = 8;
@@ -1696,6 +1701,7 @@ function SkyQualityAnalyzerDialog() {
    this.vmagEdit.onTextUpdated = function(text) {
       var v = parseFloat(text);
       self.vmag = isNaN(v) ? NaN : v;
+      self.updateUI();
    };
 
    var vmagHint = new Label(starGroupBox);
@@ -1718,6 +1724,7 @@ function SkyQualityAnalyzerDialog() {
    this.analyzeBtn = new PushButton(this);
    this.analyzeBtn.text    = "  Analyze  ";
    this.analyzeBtn.toolTip = "Run background + aperture photometry and compute SQM";
+   this.analyzeBtn.enabled = false;
    this.analyzeBtn.onClick = function() {
       self.runAnalysis();
    };
@@ -1751,6 +1758,10 @@ function SkyQualityAnalyzerDialog() {
    this.resultPixScaleLabel.textAlignment  = labelStyle;
    this.resultNFramesLabel.textAlignment   = labelStyle;
 
+   this.resultWarningLabel = new Label(resultsGroupBox);
+   this.resultWarningLabel.textAlignment  = labelStyle;
+   this.resultWarningLabel.text = "";
+
    this.clearResults();
 
    resultsGroupBox.sizer.add(this.resultSQMLabel);
@@ -1759,6 +1770,7 @@ function SkyQualityAnalyzerDialog() {
    resultsGroupBox.sizer.add(this.resultLStarLabel);
    resultsGroupBox.sizer.add(this.resultPixScaleLabel);
    resultsGroupBox.sizer.add(this.resultNFramesLabel);
+   resultsGroupBox.sizer.add(this.resultWarningLabel);
 
    this.exportCSVBtn = new PushButton(resultsGroupBox);
    this.exportCSVBtn.text    = "Export CSV...";
@@ -1818,6 +1830,7 @@ function SkyQualityAnalyzerDialog() {
 
    this.adjustToContents();
    this.updatePixelScale();
+   this.updateUI();
 }
 
 SkyQualityAnalyzerDialog.prototype = new Dialog;
@@ -1833,6 +1846,26 @@ SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function() {
       node.setText(2, f.isColor ? "Color" : "Mono");
       node.setText(3, f.wcs ? "Yes" : "\u2014");
    }
+   this.updateUI();
+};
+
+SkyQualityAnalyzerDialog.prototype.updateUI = function() {
+   var nf = this.frames.length;
+   this.framesGroupBox.title = nf > 0
+      ? "1. Frames (WBPP calibrated/debayered)  [" + nf + " frames \u2713]"
+      : "1. Frames (WBPP calibrated/debayered)";
+
+   var bgOk   = this.bgX >= 0 && this.bgY >= 0;
+   var starOk = this.starX >= 0 && this.starY >= 0;
+   this.measureGroupBox.title = "3. Measurement Settings"
+      + "  [Background " + (bgOk   ? "\u2713" : "\u2717") + "]"
+      + "  [Star "       + (starOk ? "\u2713" : "\u2717") + "]";
+
+   var vmagOk = !isNaN(this.vmag);
+   this.starGroupBox.title = "4. Reference Star Magnitude"
+      + "  [V mag " + (vmagOk ? "\u2713" : "\u2717") + "]";
+
+   this.analyzeBtn.enabled = (nf >= 2 && bgOk && starOk && vmagOk);
 };
 
 SkyQualityAnalyzerDialog.prototype.updatePixelScale = function() {
@@ -1860,6 +1893,7 @@ SkyQualityAnalyzerDialog.prototype.clearResults = function() {
    this.resultLStarLabel.text     = "L_star:          —";
    this.resultPixScaleLabel.text  = "Pixel Scale:     —";
    this.resultNFramesLabel.text   = "Frames used:     —";
+   if (this.resultWarningLabel) this.resultWarningLabel.text = "";
    if (this.exportCSVBtn) this.exportCSVBtn.enabled = false;
    this.sqmResult = null;
 };
@@ -1968,6 +2002,10 @@ SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
          + " counts/s  (R²=" + result.r2_star.toFixed(4) + ")";
       this.resultPixScaleLabel.text = "Pixel Scale:     " + result.pixel_scale.toFixed(3) + " arcsec/px";
       this.resultNFramesLabel.text  = "Frames used:     " + result.n_frames;
+      var warnings = [];
+      if (result.r2_sky  < 0.99) warnings.push("R\u00b2_sky="  + result.r2_sky.toFixed(3)  + " is low \u2014 check background ROI for stars.");
+      if (result.r2_star < 0.99) warnings.push("R\u00b2_star=" + result.r2_star.toFixed(3) + " is low \u2014 check star position and aperture.");
+      this.resultWarningLabel.text = warnings.length > 0 ? "WARNING: " + warnings.join("  /  ") : "";
       this.exportCSVBtn.enabled = true;
 
    } catch (e) {
