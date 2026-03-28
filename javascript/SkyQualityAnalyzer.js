@@ -29,6 +29,7 @@
 #define TITLE        "Sky Quality Analyzer"
 #define MAX_BMP_EDGE 1200
 #define BG_HALF      32    // Background ROI: 64x64 px (half = 32)
+#define SAT_THRESHOLD 0.97 // Pixel saturation threshold (fraction of maxADU)
 
 // ─── Debug mode ──────────────────────────────────────────────────────────────
 // Set true during development to enable verbose console output.
@@ -463,7 +464,7 @@ function parseSIMBADResponse(content) {
 
 function starSuitabilityLabel(vmag, aperture, pixelScale) {
    // Saturation risk: very bright stars may saturate even in shortest exposures.
-   if (vmag < 1.5) return "Saturation risk";
+   if (vmag < 2.0) return "Saturation risk";
 
    if (pixelScale > 0) {
       // Compute sky-noise-relative SNR proxy.
@@ -1123,13 +1124,20 @@ function measureBackground(filepath, bgX, bgY, bitsPerSample, sqmChannel) {
 
    win.close();
 
-   var stats = sigmaClippingStats(pixels, 3.0, 5);
-   return { adu_sky: stats.median, count: stats.count };
+   var stats = sigmaClippingStats(pixels, 3.0, 10);
+   // SExtractor-style mode: more robust against faint stars in the ROI
+   var skyBg = 2.5 * stats.median - 1.5 * stats.mean;
+   if (skyBg <= 0) skyBg = stats.median;  // fallback
+   return { adu_sky: skyBg, count: stats.count };
 }
 
 //============================================================================
 // Aperture photometry
-// Returns { adu_star } = net star flux (aperture sum minus sky background)
+// Returns { adu_star, saturated_fraction }
+// - adu_star: net star flux (aperture sum minus sky background).
+//   Saturated pixels are excluded; flux is scaled to full aperture area.
+// - saturated_fraction: fraction of aperture pixels at or above SAT_THRESHOLD.
+//   Frames with saturated_fraction > 0.3 are excluded from the L_star fit.
 //============================================================================
 
 function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqmChannel) {
@@ -1138,15 +1146,16 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
    var win   = wins[0];
    var image = win.mainView.image;
 
-   var isColor = (image.numberOfChannels >= 3);
-   var ch      = (isColor && sqmChannel === "G") ? 1 : 0;
-   var maxADU  = (bitsPerSample === 32) ? 4294967295 : 65535;
+   var isColor  = (image.numberOfChannels >= 3);
+   var ch       = (isColor && sqmChannel === "G") ? 1 : 0;
+   var maxADU   = (bitsPerSample === 32) ? 4294967295 : 65535;
+   var satLimit = SAT_THRESHOLD * maxADU;
 
    var r_ap  = aperture;
    var r_in  = aperture + 5;
-   var r_out = aperture + 15;
+   var r_out = aperture + 25;  // widened for more stable background estimate
 
-   // Sky annulus (sigma-clipped median)
+   // Sky annulus — sigma-clipped, SExtractor-style mode estimate
    var skyPixels = [];
    for (var y = starY - r_out - 1; y <= starY + r_out + 1; y++) {
       if (y < 0 || y >= image.height) continue;
@@ -1161,12 +1170,15 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
       }
    }
 
-   var skyStats  = sigmaClippingStats(skyPixels, 3.0, 5);
-   var skyMedian = skyStats.median;
+   var skyStats = sigmaClippingStats(skyPixels, 3.0, 10);
+   // SExtractor mode: more robust when faint stars contaminate the annulus
+   var skyBg = 2.5 * skyStats.median - 1.5 * skyStats.mean;
+   if (skyBg <= 0) skyBg = skyStats.median;  // fallback for pathological cases
 
-   // Aperture sum
-   var aperSum = 0;
-   var apCount = 0;
+   // Aperture sum with saturation masking
+   var aperSum  = 0;
+   var apCount  = 0;
+   var satCount = 0;
    for (var y = starY - r_ap - 1; y <= starY + r_ap + 1; y++) {
       if (y < 0 || y >= image.height) continue;
       for (var x = starX - r_ap - 1; x <= starX + r_ap + 1; x++) {
@@ -1174,16 +1186,29 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
          var dx = x - starX;
          var dy = y - starY;
          if (dx * dx + dy * dy <= r_ap * r_ap) {
-            aperSum += image.sample(x, y, ch) * maxADU;
             apCount++;
+            var pixADU = image.sample(x, y, ch) * maxADU;
+            if (pixADU >= satLimit) {
+               satCount++;
+            } else {
+               aperSum += pixADU;
+            }
          }
       }
    }
 
    win.close();
 
-   var netFlux = aperSum - skyMedian * apCount;
-   return { adu_star: netFlux };
+   var usedCount = apCount - satCount;
+   var netFlux;
+   if (usedCount <= 0) {
+      netFlux = NaN;
+   } else {
+      // Net flux from non-saturated pixels, scaled to full aperture area
+      netFlux = (aperSum - skyBg * usedCount) * (apCount / usedCount);
+   }
+   var saturated_fraction = (apCount > 0) ? (satCount / apCount) : 0;
+   return { adu_star: netFlux, saturated_fraction: saturated_fraction };
 }
 
 //============================================================================
@@ -1210,6 +1235,7 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
 
    var skyFrameData  = [];
    var starFrameData = [];
+   var frameResults  = [];  // per-frame data for UI display
 
    for (var i = 0; i < frames.length; i++) {
       var f  = frames[i];
@@ -1236,11 +1262,13 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
          continue;
       }
 
-      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  starXY=(%d,%d)",
-         f.filename, f.exptime, bg.adu_sky, ap.adu_star, fStarX, fStarY));
+      var satPct = Math.round((ap.saturated_fraction || 0) * 100);
+      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%%  starXY=(%d,%d)",
+         f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, fStarX, fStarY));
 
-      skyFrameData.push({ exptime: f.exptime, adu_sky:  bg.adu_sky  });
-      starFrameData.push({ exptime: f.exptime, adu_star: ap.adu_star });
+      skyFrameData.push({ exptime: f.exptime, adu_sky: bg.adu_sky });
+      starFrameData.push({ exptime: f.exptime, adu_star: ap.adu_star, saturated_fraction: ap.saturated_fraction || 0 });
+      frameResults.push({ filename: f.filename, exptime: f.exptime, adu_star: ap.adu_star, saturated_fraction: ap.saturated_fraction || 0 });
    }
 
    if (skyFrameData.length < 2) return null;
@@ -1251,23 +1279,31 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    var sqm         = computeSQM(lStarResult.L_star, lPrimeSky, vmag);
    var label       = skyConditionLabel(sqm);
 
+   // Tag each frame as used (not saturated) or excluded
+   var satThreshold = 0.3;
+   for (var k = 0; k < frameResults.length; k++) {
+      frameResults[k].used = (frameResults[k].saturated_fraction <= satThreshold);
+   }
+
    return {
-      L_sky:       lSkyResult.L_sky,
-      r2_sky:      lSkyResult.r2,
-      L_star:      lStarResult.L_star,
-      r2_star:     lStarResult.r2,
-      L_prime_sky: lPrimeSky,
-      pixel_scale: pixelScale,
-      sqm:         sqm,
-      label:       label,
-      n_frames:    skyFrameData.length,
-      sqmChannel:  sqmChannel,
-      bgX:         bgX,
-      bgY:         bgY,
-      starX:       starX,
-      starY:       starY,
-      aperture:    aperture,
-      vmag:        vmag
+      L_sky:           lSkyResult.L_sky,
+      r2_sky:          lSkyResult.r2,
+      L_star:          lStarResult.L_star,
+      r2_star:         lStarResult.r2,
+      L_prime_sky:     lPrimeSky,
+      pixel_scale:     pixelScale,
+      sqm:             sqm,
+      label:           label,
+      n_frames:        skyFrameData.length,
+      excluded_frames: lStarResult.excluded_frames || 0,
+      frameData:       frameResults,
+      sqmChannel:      sqmChannel,
+      bgX:             bgX,
+      bgY:             bgY,
+      starX:           starX,
+      starY:           starY,
+      aperture:        aperture,
+      vmag:            vmag
    };
 }
 
@@ -1346,17 +1382,21 @@ function SkyQualityAnalyzerDialog() {
 
    this.frameTree = new TreeBox(framesGroupBox);
    this.frameTree.headerVisible  = true;
-   this.frameTree.numberOfColumns = 4;
-   this.frameTree.setColumnWidth(0, 320);
-   this.frameTree.setColumnWidth(1, 80);
-   this.frameTree.setColumnWidth(2, 80);
-   this.frameTree.setColumnWidth(3, 50);
+   this.frameTree.numberOfColumns = 6;
+   this.frameTree.setColumnWidth(0, 280);
+   this.frameTree.setColumnWidth(1, 70);
+   this.frameTree.setColumnWidth(2, 70);
+   this.frameTree.setColumnWidth(3, 45);
+   this.frameTree.setColumnWidth(4, 90);
+   this.frameTree.setColumnWidth(5, 80);
    this.frameTree.setHeaderText(0, "Filename");
    this.frameTree.setHeaderText(1, "Exp (s)");
    this.frameTree.setHeaderText(2, "Color");
    this.frameTree.setHeaderText(3, "WCS");
+   this.frameTree.setHeaderText(4, "Flux (ADU)");
+   this.frameTree.setHeaderText(5, "Status");
    this.frameTree.setMinHeight(120);
-   this.frameTree.toolTip = "List of FITS frames to analyze";
+   this.frameTree.toolTip = "List of FITS frames to analyze. Flux and Status are filled after analysis.";
 
    var addFramesBtn = new PushButton(framesGroupBox);
    addFramesBtn.text    = "Add Frames...";
@@ -1762,6 +1802,24 @@ function SkyQualityAnalyzerDialog() {
    this.resultWarningLabel.textAlignment  = labelStyle;
    this.resultWarningLabel.text = "";
 
+   // Per-frame photometry table (shown after analysis)
+   this.resultFrameTree = new TreeBox(resultsGroupBox);
+   this.resultFrameTree.headerVisible = true;
+   this.resultFrameTree.numberOfColumns = 5;
+   this.resultFrameTree.setColumnWidth(0, 260);
+   this.resultFrameTree.setColumnWidth(1, 65);
+   this.resultFrameTree.setColumnWidth(2, 90);
+   this.resultFrameTree.setColumnWidth(3, 50);
+   this.resultFrameTree.setColumnWidth(4, 65);
+   this.resultFrameTree.setHeaderText(0, "Filename");
+   this.resultFrameTree.setHeaderText(1, "Exp (s)");
+   this.resultFrameTree.setHeaderText(2, "Flux (ADU)");
+   this.resultFrameTree.setHeaderText(3, "Sat%");
+   this.resultFrameTree.setHeaderText(4, "Status");
+   this.resultFrameTree.setMinHeight(90);
+   this.resultFrameTree.toolTip = "Per-frame aperture photometry results. Sat% > 30% frames are excluded from the L_star fit.";
+   this.resultFrameTree.visible = false;
+
    this.clearResults();
 
    resultsGroupBox.sizer.add(this.resultSQMLabel);
@@ -1771,6 +1829,7 @@ function SkyQualityAnalyzerDialog() {
    resultsGroupBox.sizer.add(this.resultPixScaleLabel);
    resultsGroupBox.sizer.add(this.resultNFramesLabel);
    resultsGroupBox.sizer.add(this.resultWarningLabel);
+   resultsGroupBox.sizer.add(this.resultFrameTree);
 
    this.exportCSVBtn = new PushButton(resultsGroupBox);
    this.exportCSVBtn.text    = "Export CSV...";
@@ -1835,7 +1894,7 @@ function SkyQualityAnalyzerDialog() {
 
 SkyQualityAnalyzerDialog.prototype = new Dialog;
 
-SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function() {
+SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function(frameData) {
    this.frames.sort(function(a, b) { return a.exptime - b.exptime; });
    this.frameTree.clear();
    for (var i = 0; i < this.frames.length; i++) {
@@ -1845,6 +1904,25 @@ SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function() {
       node.setText(1, f.exptime.toFixed(3));
       node.setText(2, f.isColor ? "Color" : "Mono");
       node.setText(3, f.wcs ? "Yes" : "\u2014");
+
+      // Fill analysis columns if results are available
+      var filled = false;
+      if (frameData) {
+         for (var j = 0; j < frameData.length; j++) {
+            if (frameData[j].filename === f.filename) {
+               var fd = frameData[j];
+               var satPct = Math.round(fd.saturated_fraction * 100);
+               node.setText(4, isNaN(fd.adu_star) ? "\u2014" : Math.round(fd.adu_star).toString());
+               node.setText(5, fd.used ? "OK" : ("Sat (" + satPct + "%)"));
+               filled = true;
+               break;
+            }
+         }
+      }
+      if (!filled) {
+         node.setText(4, "\u2014");
+         node.setText(5, "\u2014");
+      }
    }
    this.updateUI();
 };
@@ -1887,13 +1965,17 @@ SkyQualityAnalyzerDialog.prototype.updatePixelScale = function() {
 };
 
 SkyQualityAnalyzerDialog.prototype.clearResults = function() {
-   this.resultSQMLabel.text       = "SQM:             —";
-   this.resultConditionLabel.text = "Sky Condition:   —";
-   this.resultLSkyLabel.text      = "L_sky:           —";
-   this.resultLStarLabel.text     = "L_star:          —";
-   this.resultPixScaleLabel.text  = "Pixel Scale:     —";
-   this.resultNFramesLabel.text   = "Frames used:     —";
+   this.resultSQMLabel.text       = "SQM:             \u2014";
+   this.resultConditionLabel.text = "Sky Condition:   \u2014";
+   this.resultLSkyLabel.text      = "L_sky:           \u2014";
+   this.resultLStarLabel.text     = "L_star:          \u2014";
+   this.resultPixScaleLabel.text  = "Pixel Scale:     \u2014";
+   this.resultNFramesLabel.text   = "Frames:          \u2014";
    if (this.resultWarningLabel) this.resultWarningLabel.text = "";
+   if (this.resultFrameTree) {
+      this.resultFrameTree.clear();
+      this.resultFrameTree.visible = false;
+   }
    if (this.exportCSVBtn) this.exportCSVBtn.enabled = false;
    this.sqmResult = null;
 };
@@ -1994,18 +2076,48 @@ SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
       }
 
       // Update result labels
-      this.resultSQMLabel.text = "SQM:             " + result.sqm.toFixed(3) + " mag/arcsec²";
+      var nUsed     = result.n_frames - (result.excluded_frames || 0);
+      var nExcluded = result.excluded_frames || 0;
+      var excludedStr = (nExcluded > 0)
+         ? ("  (" + nUsed + " used / " + nExcluded + " excluded \u2014 saturation)")
+         : ("  (" + nUsed + " frames)");
+
+      this.resultSQMLabel.text = "SQM:             " + result.sqm.toFixed(3) + " mag/arcsec\u00b2";
       this.resultConditionLabel.text = "Sky Condition:   " + result.label;
       this.resultLSkyLabel.text  = "L_sky:           " + result.L_sky.toFixed(4)
-         + " counts/s/px  (R²=" + result.r2_sky.toFixed(4) + ")";
+         + " counts/s/px  (R\u00b2=" + result.r2_sky.toFixed(4) + ")";
       this.resultLStarLabel.text = "L_star:          " + result.L_star.toFixed(1)
-         + " counts/s  (R²=" + result.r2_star.toFixed(4) + ")";
+         + " counts/s  (R\u00b2=" + result.r2_star.toFixed(4) + ")" + excludedStr;
       this.resultPixScaleLabel.text = "Pixel Scale:     " + result.pixel_scale.toFixed(3) + " arcsec/px";
-      this.resultNFramesLabel.text  = "Frames used:     " + result.n_frames;
+      this.resultNFramesLabel.text  = "Frames:          " + result.n_frames + " measured"
+         + (nExcluded > 0 ? ",  " + nUsed + " used for L_star  (" + nExcluded + " sat excluded)" : "");
+
       var warnings = [];
       if (result.r2_sky  < 0.99) warnings.push("R\u00b2_sky="  + result.r2_sky.toFixed(3)  + " is low \u2014 check background ROI for stars.");
       if (result.r2_star < 0.99) warnings.push("R\u00b2_star=" + result.r2_star.toFixed(3) + " is low \u2014 check star position and aperture.");
+      if (isNaN(result.sqm) && nExcluded === result.n_frames)
+         warnings.push("All frames saturated \u2014 shorten exposure or defocus.");
       this.resultWarningLabel.text = warnings.length > 0 ? "WARNING: " + warnings.join("  /  ") : "";
+
+      // Populate per-frame photometry table
+      if (result.frameData && result.frameData.length > 0) {
+         this.resultFrameTree.clear();
+         for (var k = 0; k < result.frameData.length; k++) {
+            var fd   = result.frameData[k];
+            var sat  = Math.round(fd.saturated_fraction * 100);
+            var node = new TreeBoxNode(this.resultFrameTree);
+            node.setText(0, fd.filename);
+            node.setText(1, fd.exptime.toFixed(3));
+            node.setText(2, isNaN(fd.adu_star) ? "\u2014" : Math.round(fd.adu_star).toString());
+            node.setText(3, sat + "%");
+            node.setText(4, fd.used ? "OK" : "Sat");
+         }
+         this.resultFrameTree.visible = true;
+      }
+
+      // Refresh frame list with analysis status
+      this.refreshFrameTree(result.frameData);
+
       this.exportCSVBtn.enabled = true;
 
    } catch (e) {

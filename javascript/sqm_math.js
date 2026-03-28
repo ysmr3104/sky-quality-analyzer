@@ -7,15 +7,15 @@
 // ============================================================
 
 /**
- * Compute sigma-clipped median and standard deviation of an array.
+ * Compute sigma-clipped median, mean and standard deviation of an array.
  * @param {number[]} values - Input array of pixel values
  * @param {number} sigma    - Clipping threshold in units of std dev (default 3.0)
- * @param {number} maxIter  - Maximum iterations (default 5)
- * @returns {{median: number, std: number, count: number}}
+ * @param {number} maxIter  - Maximum iterations (default 10)
+ * @returns {{median: number, mean: number, std: number, count: number}}
  */
 function sigmaClippingStats(values, sigma, maxIter) {
     if (sigma === undefined) sigma = 3.0;
-    if (maxIter === undefined) maxIter = 5;
+    if (maxIter === undefined) maxIter = 10;
 
     var data = values.slice(); // copy
 
@@ -38,7 +38,10 @@ function sigmaClippingStats(values, sigma, maxIter) {
 
     var finalMed = median(data);
     var finalStd = standardDeviation(data, finalMed);
-    return { median: finalMed, std: finalStd, count: data.length };
+    var sum = 0;
+    for (var i = 0; i < data.length; i++) { sum += data[i]; }
+    var finalMean = (data.length > 0) ? sum / data.length : finalMed;
+    return { median: finalMed, mean: finalMean, std: finalStd, count: data.length };
 }
 
 /**
@@ -139,18 +142,30 @@ function computeLSky(frames) {
  * Compute L_star (reference star flux per second) from multi-exposure frames.
  * Each frame must have {exptime, adu_star} where adu_star is the
  * aperture-photometry net count for the reference star.
- * @param {{exptime: number, adu_star: number}[]} frames
- * @returns {{L_star: number, r2: number}}
+ * Frames with saturated_fraction > satThreshold are excluded from the fit.
+ * @param {{exptime: number, adu_star: number, saturated_fraction?: number}[]} frames
+ * @param {number} [satThreshold=0.3] - Frames with saturation above this fraction are excluded
+ * @returns {{L_star: number, r2: number, excluded_frames: number}}
  */
-function computeLStar(frames) {
+function computeLStar(frames, satThreshold) {
+    if (satThreshold === undefined) satThreshold = 0.3;
     var tValues = [];
     var adValues = [];
+    var excluded = 0;
     for (var i = 0; i < frames.length; i++) {
+        var sat = frames[i].saturated_fraction;
+        if (sat !== undefined && sat > satThreshold) {
+            excluded++;
+            continue;
+        }
         tValues.push(frames[i].exptime);
         adValues.push(frames[i].adu_star);
     }
+    if (tValues.length < 2) {
+        return { L_star: NaN, r2: NaN, excluded_frames: excluded };
+    }
     var fit = linearFit(tValues, adValues);
-    return { L_star: fit.slope, r2: fit.r2 };
+    return { L_star: fit.slope, r2: fit.r2, excluded_frames: excluded };
 }
 
 /**
