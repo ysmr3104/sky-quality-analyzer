@@ -1517,6 +1517,7 @@ function SkyQualityAnalyzerDialog() {
 
    var bgSelectBtn = new PushButton(measureGroupBox);
    bgSelectBtn.text    = "Select Region...";
+   bgSelectBtn.setFixedWidth(120);
    bgSelectBtn.toolTip = "Click on a star-free background region (longest-exposure frame shown)";
    bgSelectBtn.onClick = function() {
       if (self.frames.length === 0) {
@@ -1556,6 +1557,7 @@ function SkyQualityAnalyzerDialog() {
 
    var starSelectBtn = new PushButton(measureGroupBox);
    starSelectBtn.text    = "Select Star...";
+   starSelectBtn.setFixedWidth(120);
    starSelectBtn.toolTip = "Click on the reference star in the first frame";
    starSelectBtn.onClick = function() {
       if (self.frames.length === 0) {
