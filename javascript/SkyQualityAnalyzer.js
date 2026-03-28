@@ -2032,4 +2032,6 @@ function main() {
    console.writeln(TITLE + " finished.");
 }
 
-main();
+if (typeof __SQA_LIBRARY_MODE === "undefined" || !__SQA_LIBRARY_MODE) {
+   main();
+}

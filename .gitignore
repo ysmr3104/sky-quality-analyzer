@@ -1,3 +1,6 @@
 .build-tmp/
 .DS_Store
 *.swp
+
+# テスト用画像フィクスチャ（大容量のため除外、後でクロップ版に差し替え予定）
+tests/fixtures/xisf/

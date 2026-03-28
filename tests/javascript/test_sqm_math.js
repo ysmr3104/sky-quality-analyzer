@@ -151,6 +151,7 @@ assert(isNaN(math.computeSQM(-1, 1.0, 4.7)), "negative L_star returns NaN");
 // ============================================================
 console.log("\n--- skyConditionLabel ---");
 
+// Representative values
 assert(math.skyConditionLabel(22.5) === "Pristine Dark Sky",          "22.5 → Pristine Dark Sky");
 assert(math.skyConditionLabel(21.7) === "Truly Dark Sky",             "21.7 → Truly Dark Sky");
 assert(math.skyConditionLabel(21.2) === "Rural Sky",                  "21.2 → Rural Sky");
@@ -158,6 +159,15 @@ assert(math.skyConditionLabel(20.5) === "Rural/Suburban Transition",  "20.5 → 
 assert(math.skyConditionLabel(19.5) === "Suburban Sky",               "19.5 → Suburban Sky");
 assert(math.skyConditionLabel(18.4) === "Bright Suburban Sky",        "18.4 → Bright Suburban Sky");
 assert(math.skyConditionLabel(17.0) === "Urban Sky",                  "17.0 → Urban Sky");
+
+// Boundary values (exact thresholds)
+assert(math.skyConditionLabel(22.0) === "Pristine Dark Sky",         "22.0 → Pristine Dark Sky (boundary)");
+assert(math.skyConditionLabel(21.5) === "Truly Dark Sky",            "21.5 → Truly Dark Sky (boundary)");
+assert(math.skyConditionLabel(21.0) === "Rural Sky",                 "21.0 → Rural Sky (boundary)");
+assert(math.skyConditionLabel(20.0) === "Rural/Suburban Transition", "20.0 → Rural/Suburban Transition (boundary)");
+assert(math.skyConditionLabel(19.0) === "Suburban Sky",              "19.0 → Suburban Sky (boundary)");
+assert(math.skyConditionLabel(18.0) === "Bright Suburban Sky",       "18.0 → Bright Suburban Sky (boundary)");
+assert(math.skyConditionLabel(17.999) === "Urban Sky",               "17.999 → Urban Sky (just below 18.0)");
 
 // ============================================================
 // normalizedToADU
