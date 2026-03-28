@@ -1382,21 +1382,23 @@ function SkyQualityAnalyzerDialog() {
 
    this.frameTree = new TreeBox(framesGroupBox);
    this.frameTree.headerVisible  = true;
-   this.frameTree.numberOfColumns = 6;
+   this.frameTree.numberOfColumns = 7;
    this.frameTree.setColumnWidth(0, 280);
    this.frameTree.setColumnWidth(1, 70);
    this.frameTree.setColumnWidth(2, 70);
    this.frameTree.setColumnWidth(3, 45);
    this.frameTree.setColumnWidth(4, 90);
-   this.frameTree.setColumnWidth(5, 80);
+   this.frameTree.setColumnWidth(5, 50);
+   this.frameTree.setColumnWidth(6, 80);
    this.frameTree.setHeaderText(0, "Filename");
    this.frameTree.setHeaderText(1, "Exp (s)");
    this.frameTree.setHeaderText(2, "Color");
    this.frameTree.setHeaderText(3, "WCS");
    this.frameTree.setHeaderText(4, "Flux (ADU)");
-   this.frameTree.setHeaderText(5, "Status");
+   this.frameTree.setHeaderText(5, "Sat%");
+   this.frameTree.setHeaderText(6, "Status");
    this.frameTree.setMinHeight(120);
-   this.frameTree.toolTip = "List of FITS frames to analyze. Flux and Status are filled after analysis.";
+   this.frameTree.toolTip = "List of FITS frames to analyze. Flux, Sat% and Status are filled after analysis.";
 
    var addFramesBtn = new PushButton(framesGroupBox);
    addFramesBtn.text    = "Add Frames...";
@@ -1658,7 +1660,7 @@ function SkyQualityAnalyzerDialog() {
    this.apertureSpinBox.toolTip  = "Aperture radius in pixels. Increase for defocused stars.";
 
    var apUnitLabel = new Label(measureGroupBox);
-   apUnitLabel.text = "px  (sky annulus: r+5 to r+15)";
+   apUnitLabel.text = "px  (sky annulus: r+5 to r+25)";
    apUnitLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
 
    var apRow = new HorizontalSizer;
@@ -1802,24 +1804,6 @@ function SkyQualityAnalyzerDialog() {
    this.resultWarningLabel.textAlignment  = labelStyle;
    this.resultWarningLabel.text = "";
 
-   // Per-frame photometry table (shown after analysis)
-   this.resultFrameTree = new TreeBox(resultsGroupBox);
-   this.resultFrameTree.headerVisible = true;
-   this.resultFrameTree.numberOfColumns = 5;
-   this.resultFrameTree.setColumnWidth(0, 260);
-   this.resultFrameTree.setColumnWidth(1, 65);
-   this.resultFrameTree.setColumnWidth(2, 90);
-   this.resultFrameTree.setColumnWidth(3, 50);
-   this.resultFrameTree.setColumnWidth(4, 65);
-   this.resultFrameTree.setHeaderText(0, "Filename");
-   this.resultFrameTree.setHeaderText(1, "Exp (s)");
-   this.resultFrameTree.setHeaderText(2, "Flux (ADU)");
-   this.resultFrameTree.setHeaderText(3, "Sat%");
-   this.resultFrameTree.setHeaderText(4, "Status");
-   this.resultFrameTree.setMinHeight(90);
-   this.resultFrameTree.toolTip = "Per-frame aperture photometry results. Sat% > 30% frames are excluded from the L_star fit.";
-   this.resultFrameTree.visible = false;
-
    this.clearResults();
 
    resultsGroupBox.sizer.add(this.resultSQMLabel);
@@ -1829,7 +1813,6 @@ function SkyQualityAnalyzerDialog() {
    resultsGroupBox.sizer.add(this.resultPixScaleLabel);
    resultsGroupBox.sizer.add(this.resultNFramesLabel);
    resultsGroupBox.sizer.add(this.resultWarningLabel);
-   resultsGroupBox.sizer.add(this.resultFrameTree);
 
    this.exportCSVBtn = new PushButton(resultsGroupBox);
    this.exportCSVBtn.text    = "Export CSV...";
@@ -1913,7 +1896,8 @@ SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function(frameData) {
                var fd = frameData[j];
                var satPct = Math.round(fd.saturated_fraction * 100);
                node.setText(4, isNaN(fd.adu_star) ? "\u2014" : Math.round(fd.adu_star).toString());
-               node.setText(5, fd.used ? "OK" : ("Sat (" + satPct + "%)"));
+               node.setText(5, satPct + "%");
+               node.setText(6, fd.used ? "OK" : "Sat");
                filled = true;
                break;
             }
@@ -1922,6 +1906,7 @@ SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function(frameData) {
       if (!filled) {
          node.setText(4, "\u2014");
          node.setText(5, "\u2014");
+         node.setText(6, "\u2014");
       }
    }
    this.updateUI();
@@ -1972,10 +1957,6 @@ SkyQualityAnalyzerDialog.prototype.clearResults = function() {
    this.resultPixScaleLabel.text  = "Pixel Scale:     \u2014";
    this.resultNFramesLabel.text   = "Frames:          \u2014";
    if (this.resultWarningLabel) this.resultWarningLabel.text = "";
-   if (this.resultFrameTree) {
-      this.resultFrameTree.clear();
-      this.resultFrameTree.visible = false;
-   }
    if (this.exportCSVBtn) this.exportCSVBtn.enabled = false;
    this.sqmResult = null;
 };
@@ -2099,23 +2080,7 @@ SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
          warnings.push("All frames saturated \u2014 shorten exposure or defocus.");
       this.resultWarningLabel.text = warnings.length > 0 ? "WARNING: " + warnings.join("  /  ") : "";
 
-      // Populate per-frame photometry table
-      if (result.frameData && result.frameData.length > 0) {
-         this.resultFrameTree.clear();
-         for (var k = 0; k < result.frameData.length; k++) {
-            var fd   = result.frameData[k];
-            var sat  = Math.round(fd.saturated_fraction * 100);
-            var node = new TreeBoxNode(this.resultFrameTree);
-            node.setText(0, fd.filename);
-            node.setText(1, fd.exptime.toFixed(3));
-            node.setText(2, isNaN(fd.adu_star) ? "\u2014" : Math.round(fd.adu_star).toString());
-            node.setText(3, sat + "%");
-            node.setText(4, fd.used ? "OK" : "Sat");
-         }
-         this.resultFrameTree.visible = true;
-      }
-
-      // Refresh frame list with analysis status
+      // Refresh frame list with analysis status (Flux, Sat%, Status columns)
       this.refreshFrameTree(result.frameData);
 
       this.exportCSVBtn.enabled = true;
