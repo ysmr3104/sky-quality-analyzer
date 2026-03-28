@@ -724,7 +724,7 @@ function PointPreviewControl(parent, mode) {
                // Draw aperture circle + sky annulus
                var r  = self.aperture * scale * self.zoomLevel;
                var ri = (self.aperture + 5)  * scale * self.zoomLevel;
-               var ro = (self.aperture + 15) * scale * self.zoomLevel;
+               var ro = (self.aperture + 25) * scale * self.zoomLevel;
                g.pen = new Pen(0xFF00FF00, 1.5);
                g.drawCircle(bx, by, r);
                g.pen = new Pen(0xFF00FFFF, 1.0);
