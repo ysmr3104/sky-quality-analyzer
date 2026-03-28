@@ -1601,7 +1601,7 @@ function SkyQualityAnalyzerDialog() {
 
    var starSelectBtn = new PushButton(measureGroupBox);
    starSelectBtn.text    = "Select Star...";
-   starSelectBtn.toolTip = "Click on the reference star in the first frame";
+   starSelectBtn.toolTip = "Click on the reference star (longest-exposure frame shown)";
    starSelectBtn.onClick = function() {
       if (self.frames.length === 0) {
          var mb = new MessageBox("Please add frames first.", TITLE, StdIcon_Warning, StdButton_Ok);
@@ -1620,10 +1620,20 @@ function SkyQualityAnalyzerDialog() {
             currentPs = computePixelScale(camE.pixel_pitch, teleE.focal_length, 1);
          }
       }
-      // Use pre-loaded WCS from readFrameMetadata (avoids re-opening files)
-      var previewFrame = self.frames[0];
+      // Use longest-exposure frame with WCS (best SNR for star identification).
+      // Fall back to longest-exposure frame without WCS if none are solved.
+      var previewFrame = null;
       for (var fi = 0; fi < self.frames.length; fi++) {
-         if (self.frames[fi].wcs) { previewFrame = self.frames[fi]; break; }
+         if (self.frames[fi].wcs) {
+            if (!previewFrame || self.frames[fi].exptime > previewFrame.exptime)
+               previewFrame = self.frames[fi];
+         }
+      }
+      if (!previewFrame) {
+         previewFrame = self.frames[0];
+         for (var fi = 0; fi < self.frames.length; fi++) {
+            if (self.frames[fi].exptime > previewFrame.exptime) previewFrame = self.frames[fi];
+         }
       }
       var dlg = new PointSelectionDialog(self, "Select Reference Star",
          previewFrame.filepath, "star", ap, previewFrame.wcs, currentPs);
