@@ -1823,6 +1823,7 @@ function SkyQualityAnalyzerDialog() {
 SkyQualityAnalyzerDialog.prototype = new Dialog;
 
 SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function() {
+   this.frames.sort(function(a, b) { return a.exptime - b.exptime; });
    this.frameTree.clear();
    for (var i = 0; i < this.frames.length; i++) {
       var f = this.frames[i];
