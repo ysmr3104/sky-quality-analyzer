@@ -228,7 +228,7 @@ function readXISFHeaderWCS(filepath, imageHeight) {
    try {
       // Open file for reading (PixInsight PJSR File API)
       var f = new File;
-      f.open(filepath, FileMode_Read);
+      f.open(filepath, FileMode.Read);
       dbg("  file opened OK, size=" + f.size);
 
       // Read and verify XISF signature (8 bytes: "XISF0100")
@@ -1407,8 +1407,8 @@ constructor() {
       if (!od.execute()) return;
 
       var added = 0;
-      for (var i = 0; i < od.fileNames.length; i++) {
-         var fp = od.fileNames[i];
+      for (var i = 0; i < od.filePaths.length; i++) {
+         var fp = od.filePaths[i];
          // Skip duplicates
          var dup = false;
          for (var j = 0; j < self.frames.length; j++) {
