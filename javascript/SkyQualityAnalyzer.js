@@ -235,13 +235,8 @@ function readXISFHeaderWCS(filepath, imageHeight) {
       var sig = f.read(DataType.ByteArray, 8);
       dbg("  typeof sig=" + typeof sig + " sig.length=" + (sig ? sig.length : "null"));
 
-      // ByteArray in PJSR may use .at() instead of []
-      var b0 = (sig.at !== undefined) ? sig.at(0) : sig[0];
-      var b1 = (sig.at !== undefined) ? sig.at(1) : sig[1];
-      var b2 = (sig.at !== undefined) ? sig.at(2) : sig[2];
-      var b3 = (sig.at !== undefined) ? sig.at(3) : sig[3];
-      dbg("  sig[0..3]=" + b0 + "," + b1 + "," + b2 + "," + b3);
-      if (b0 !== 88 || b1 !== 73 || b2 !== 83 || b3 !== 70) {
+      dbg("  sig[0..3]=" + sig[0] + "," + sig[1] + "," + sig[2] + "," + sig[3]);
+      if (sig[0] !== 88 || sig[1] !== 73 || sig[2] !== 83 || sig[3] !== 70) {
          f.close();
          dbg("  not XISF (bad signature)");
          return null; // not XISF
@@ -249,11 +244,7 @@ function readXISFHeaderWCS(filepath, imageHeight) {
 
       // Read header length (uint32 LE, 4 bytes)
       var lb = f.read(DataType.ByteArray, 4);
-      var lb0 = (lb.at !== undefined) ? lb.at(0) : lb[0];
-      var lb1 = (lb.at !== undefined) ? lb.at(1) : lb[1];
-      var lb2 = (lb.at !== undefined) ? lb.at(2) : lb[2];
-      var lb3 = (lb.at !== undefined) ? lb.at(3) : lb[3];
-      var hdrLen = lb0 | (lb1 << 8) | (lb2 << 16) | (lb3 << 24);
+      var hdrLen = lb[0] | (lb[1] << 8) | (lb[2] << 16) | (lb[3] << 24);
       dbg("  hdrLen=" + hdrLen);
 
       // Skip 4 reserved bytes
@@ -268,8 +259,7 @@ function readXISFHeaderWCS(filepath, imageHeight) {
 
       // Convert ByteArray → string byte by byte
       for (var si = 0; si < xmlBytes.length; si++) {
-         var bv = (xmlBytes.at !== undefined) ? xmlBytes.at(si) : xmlBytes[si];
-         xml += String.fromCharCode(bv);
+         xml += String.fromCharCode(xmlBytes[si]);
          // Early stop once WCS keywords are found (avoid processing whole header)
          if (si > 4096 && xml.indexOf("CD2_2") >= 0 && xml.indexOf("CRPIX2") >= 0) break;
       }
@@ -1828,9 +1818,9 @@ constructor() {
       sd.initialPath  = "sqm_result.csv";
       if (!sd.execute()) return;
       try {
-         exportCSV(self.sqmResult, self.frames, sd.fileName);
-         console.writeln("Results exported: " + sd.fileName);
-         var mb = new MessageBox("Exported:\n" + sd.fileName, TITLE, StdIcon.NoIcon, StdButton.Ok);
+         exportCSV(self.sqmResult, self.frames, sd.filePath);
+         console.writeln("Results exported: " + sd.filePath);
+         var mb = new MessageBox("Exported:\n" + sd.filePath, TITLE, StdIcon.NoIcon, StdButton.Ok);
          mb.execute();
       } catch (e) {
          var mb = new MessageBox("Export failed:\n" + e, TITLE, StdIcon.Error, StdButton.Ok);
