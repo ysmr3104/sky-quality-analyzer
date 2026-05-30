@@ -1,3 +1,5 @@
+#engine v8
+
 #feature-id    SkyQualityAnalyzer : Utility > SkyQualityAnalyzer
 #feature-info  Compute Sky Quality Meter (SQM) values from calibrated astronomical \
    FITS images using the reference star method with multi-exposure frames.
@@ -15,21 +17,14 @@
 
 #define VERSION "0.0.1"
 
-#include <pjsr/DataType.jsh>
-#include <pjsr/FileMode.jsh>
-#include <pjsr/StdIcon.jsh>
-#include <pjsr/StdButton.jsh>
-#include <pjsr/StdCursor.jsh>
-#include <pjsr/TextAlign.jsh>
-#include <pjsr/Sizer.jsh>
-#include <pjsr/Color.jsh>
-
 #include "sqm_math.js"
 
 #define TITLE        "Sky Quality Analyzer"
 #define MAX_BMP_EDGE 1200
 #define BG_HALF      32    // Background ROI: 64x64 px (half = 32)
 #define SAT_THRESHOLD 0.97 // Pixel saturation threshold (fraction of maxADU)
+
+CoreApplication.ensureMinimumVersion(1, 9, 4);
 
 // ─── Debug mode ──────────────────────────────────────────────────────────────
 // Set true during development to enable verbose console output.
@@ -491,9 +486,9 @@ function starSuitabilityLabel(vmag, aperture, pixelScale) {
 // NearbyStarDialog — show SIMBAD results, user picks a star
 //============================================================================
 
-function NearbyStarDialog(stars, aperture, pixelScale) {
-   this.__base__ = Dialog;
-   this.__base__();
+var NearbyStarDialog = class extends Dialog {
+constructor(stars, aperture, pixelScale) {
+      super();
 
    var self = this;
    this.selectedStar = null;
@@ -502,7 +497,7 @@ function NearbyStarDialog(stars, aperture, pixelScale) {
 
    var infoLabel = new Label(this);
    infoLabel.text = "Stars near the clicked position (sorted by V magnitude):";
-   infoLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   infoLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    var ap = (aperture > 0) ? aperture : 15;
    var ps = (pixelScale > 0) ? pixelScale : 0;
@@ -538,7 +533,7 @@ function NearbyStarDialog(stars, aperture, pixelScale) {
    } else {
       hintLabel.text = "Suitability based on V magnitude only (select camera/telescope for aperture-based estimate).";
    }
-   hintLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   hintLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    this.selectBtn = new PushButton(this);
    this.selectBtn.text = "Use This Star";
@@ -547,7 +542,7 @@ function NearbyStarDialog(stars, aperture, pixelScale) {
       var sel = self.starTree.selectedNodes;
       if (sel.length === 0) {
          var mb = new MessageBox("Please select a star from the list.",
-            TITLE, StdIcon_Warning, StdButton_Ok);
+            TITLE, StdIcon.Warning, StdButton.Ok);
          mb.execute();
          return;
       }
@@ -578,9 +573,8 @@ function NearbyStarDialog(stars, aperture, pixelScale) {
    this.sizer.add(btnSizer);
 
    this.adjustToContents();
-}
-
-NearbyStarDialog.prototype = new Dialog;
+   }
+};
 
 //============================================================================
 // Auto-stretch (MTF-based) — for image preview
@@ -664,9 +658,9 @@ function createStretchedBitmap(image, maxEdge) {
 // mode: "background" draws a 64x64 box; "star" draws an aperture circle
 //============================================================================
 
-function PointPreviewControl(parent, mode) {
-   this.__base__ = ScrollBox;
-   this.__base__(parent);
+var PointPreviewControl = class extends ScrollBox {
+constructor(parent, mode) {
+      super(parent);
 
    this.bitmapResult = null;
    this.zoomLevel    = 1.0;
@@ -692,7 +686,7 @@ function PointPreviewControl(parent, mode) {
    this.autoScrolls = false;
 
    var self = this;
-   this.viewport.cursor = new Cursor(StdCursor_Arrow);
+   this.viewport.cursor = new Cursor(StdCursor.Arrow);
 
    this.onHorizontalScrollPosUpdated = function(pos) { self.scrollX = pos; self.viewport.update(); };
    this.onVerticalScrollPosUpdated   = function(pos) { self.scrollY = pos; self.viewport.update(); };
@@ -758,7 +752,7 @@ function PointPreviewControl(parent, mode) {
       var dy = y - self.dragStartY;
       if (!self.hasMoved && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
          self.hasMoved = true;
-         self.viewport.cursor = new Cursor(StdCursor_ClosedHand);
+         self.viewport.cursor = new Cursor(StdCursor.ClosedHand);
       }
       if (self.hasMoved) self.setScroll(self.panScrollX - dx, self.panScrollY - dy);
    };
@@ -776,7 +770,7 @@ function PointPreviewControl(parent, mode) {
       }
       self.isDragging = false;
       self.hasMoved   = false;
-      self.viewport.cursor = new Cursor(StdCursor_Arrow);
+      self.viewport.cursor = new Cursor(StdCursor.Arrow);
    };
 
    this.viewport.onMouseWheel = function(x, y, delta, buttonState, modifiers) {
@@ -798,71 +792,70 @@ function PointPreviewControl(parent, mode) {
       self.zoomLevel = newZoom;
       self.updateViewport();
    };
-}
-
-PointPreviewControl.prototype = new ScrollBox;
-
-PointPreviewControl.prototype.setBitmap = function(bitmapResult) {
-   this.bitmapResult = bitmapResult;
-   this.scrollX = 0;
-   this.scrollY = 0;
-   this.fitToWindow();
-};
-
-PointPreviewControl.prototype.setScroll = function(x, y) {
-   this.scrollX = Math.max(0, Math.min(this.maxScrollX, Math.round(x)));
-   this.scrollY = Math.max(0, Math.min(this.maxScrollY, Math.round(y)));
-   this.horizontalScrollPosition = this.scrollX;
-   this.verticalScrollPosition   = this.scrollY;
-   this.viewport.update();
-};
-
-PointPreviewControl.prototype.updateViewport = function() {
-   var bmp = this.bitmapResult ? this.bitmapResult.bitmap : null;
-   if (!bmp) return;
-   var dispW = Math.round(bmp.width  * this.zoomLevel);
-   var dispH = Math.round(bmp.height * this.zoomLevel);
-   var viewW = Math.max(1, this.viewport.width  || this.width);
-   var viewH = Math.max(1, this.viewport.height || this.height);
-
-   this.maxScrollX = Math.max(0, dispW - viewW);
-   this.maxScrollY = Math.max(0, dispH - viewH);
-   this.scrollX = Math.max(0, Math.min(this.maxScrollX, this.scrollX));
-   this.scrollY = Math.max(0, Math.min(this.maxScrollY, this.scrollY));
-
-   this.setHorizontalScrollRange(0, this.maxScrollX);
-   this.setVerticalScrollRange(0, this.maxScrollY);
-   this.horizontalScrollPosition = this.scrollX;
-   this.verticalScrollPosition   = this.scrollY;
-   this.viewport.update();
-};
-
-PointPreviewControl.prototype.fitToWindow = function() {
-   var bmp = this.bitmapResult ? this.bitmapResult.bitmap : null;
-   if (!bmp) return;
-   var viewW = Math.max(1, this.viewport.width  || this.width);
-   var viewH = Math.max(1, this.viewport.height || this.height);
-   var fitZoom = Math.min(viewW / bmp.width, viewH / bmp.height);
-   // Snap to nearest zoom level
-   var best = 0, bestDiff = 1e9;
-   for (var i = 0; i < this.zoomLevels.length; i++) {
-      var d = Math.abs(this.zoomLevels[i] - fitZoom);
-      if (d < bestDiff) { bestDiff = d; best = i; }
    }
-   this.zoomIndex = best;
-   this.zoomLevel = this.zoomLevels[best];
-   this.scrollX = 0;
-   this.scrollY = 0;
-   this.updateViewport();
+
+   setBitmap(bitmapResult) {
+      this.bitmapResult = bitmapResult;
+      this.scrollX = 0;
+      this.scrollY = 0;
+      this.fitToWindow();
+   }
+
+   setScroll(x, y) {
+      this.scrollX = Math.max(0, Math.min(this.maxScrollX, Math.round(x)));
+      this.scrollY = Math.max(0, Math.min(this.maxScrollY, Math.round(y)));
+      this.horizontalScrollPosition = this.scrollX;
+      this.verticalScrollPosition   = this.scrollY;
+      this.viewport.update();
+   }
+
+   updateViewport() {
+      var bmp = this.bitmapResult ? this.bitmapResult.bitmap : null;
+      if (!bmp) return;
+      var dispW = Math.round(bmp.width  * this.zoomLevel);
+      var dispH = Math.round(bmp.height * this.zoomLevel);
+      var viewW = Math.max(1, this.viewport.width  || this.width);
+      var viewH = Math.max(1, this.viewport.height || this.height);
+
+      this.maxScrollX = Math.max(0, dispW - viewW);
+      this.maxScrollY = Math.max(0, dispH - viewH);
+      this.scrollX = Math.max(0, Math.min(this.maxScrollX, this.scrollX));
+      this.scrollY = Math.max(0, Math.min(this.maxScrollY, this.scrollY));
+
+      this.setHorizontalScrollRange(0, this.maxScrollX);
+      this.setVerticalScrollRange(0, this.maxScrollY);
+      this.horizontalScrollPosition = this.scrollX;
+      this.verticalScrollPosition   = this.scrollY;
+      this.viewport.update();
+   }
+
+   fitToWindow() {
+      var bmp = this.bitmapResult ? this.bitmapResult.bitmap : null;
+      if (!bmp) return;
+      var viewW = Math.max(1, this.viewport.width  || this.width);
+      var viewH = Math.max(1, this.viewport.height || this.height);
+      var fitZoom = Math.min(viewW / bmp.width, viewH / bmp.height);
+      // Snap to nearest zoom level
+      var best = 0, bestDiff = 1e9;
+      for (var i = 0; i < this.zoomLevels.length; i++) {
+         var d = Math.abs(this.zoomLevels[i] - fitZoom);
+         if (d < bestDiff) { bestDiff = d; best = i; }
+      }
+      this.zoomIndex = best;
+      this.zoomLevel = this.zoomLevels[best];
+      this.scrollX = 0;
+      this.scrollY = 0;
+      this.updateViewport();
+   }
 };
 
 //============================================================================
 // PointSelectionDialog — show a frame preview and let user click a position
 //============================================================================
 
-function PointSelectionDialog(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
-   this.__base__ = Dialog;
-   this.__base__();
+var PointSelectionDialog = class extends Dialog {
+constructor(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
+      super();
 
    var self = this;
    this.selectedX    = -1;
@@ -886,14 +879,14 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture, preloaded
       instructLabel.text = "Click on the center of the reference star. "
          + "The green circle shows the aperture; cyan circles show the sky annulus.";
    }
-   instructLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   instructLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    this.preview = new PointPreviewControl(this, mode);
    this.preview.aperture = aperture || 15;
 
    this.coordLabel = new Label(this);
    this.coordLabel.text = "Position: (not selected)";
-   this.coordLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   this.coordLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    // "Find in Catalog" button — only shown in star mode
    this.catalogBtn = null;
@@ -907,7 +900,7 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture, preloaded
             var mb = new MessageBox(
                "No WCS astrometric solution found in this frame.\n"
                + "Please plate-solve the images first, or enter the star name manually.",
-               TITLE, StdIcon_Warning, StdButton_Ok);
+               TITLE, StdIcon.Warning, StdButton.Ok);
             mb.execute();
             return;
          }
@@ -943,7 +936,7 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture, preloaded
                + "This field may not contain a bright enough reference star.\n"
                + "Try entering star name and V magnitude manually, or\n"
                + "capture frames covering a brighter star (V < 8 recommended).",
-               TITLE, StdIcon_Warning, StdButton_Ok);
+               TITLE, StdIcon.Warning, StdButton.Ok);
             mb.execute();
             return;
          }
@@ -965,7 +958,7 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture, preloaded
                "No suitable stars found within the image frame.\n"
                + "The bright stars in this field may all lie outside the image bounds.\n"
                + "Try entering the star name and V magnitude manually.",
-               TITLE, StdIcon_Warning, StdButton_Ok);
+               TITLE, StdIcon.Warning, StdButton.Ok);
             mb.execute();
             return;
          }
@@ -1006,7 +999,7 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture, preloaded
    this.okButton.icon = this.scaledResource(":/icons/ok.png");
    this.okButton.onClick = function() {
       if (self.selectedX < 0) {
-         var mb = new MessageBox("Please click to select a position.", TITLE, StdIcon_Warning, StdButton_Ok);
+         var mb = new MessageBox("Please click to select a position.", TITLE, StdIcon.Warning, StdButton.Ok);
          mb.execute();
          return;
       }
@@ -1088,12 +1081,11 @@ function PointSelectionDialog(parent, title, filepath, mode, aperture, preloaded
       }
       win.close();
    } else {
-      var mb = new MessageBox("Cannot open file:\n" + filepath, TITLE, StdIcon_Error, StdButton_Ok);
+      var mb = new MessageBox("Cannot open file:\n" + filepath, TITLE, StdIcon.Error, StdButton.Ok);
       mb.execute();
    }
-}
-
-PointSelectionDialog.prototype = new Dialog;
+   }
+};
 
 //============================================================================
 // Background measurement
@@ -1345,9 +1337,9 @@ function exportCSV(result, frames, outputPath) {
 // Main Dialog
 //============================================================================
 
-function SkyQualityAnalyzerDialog() {
-   this.__base__ = Dialog;
-   this.__base__();
+var SkyQualityAnalyzerDialog = class extends Dialog {
+constructor() {
+      super();
 
    var self = this;
 
@@ -1368,7 +1360,7 @@ function SkyQualityAnalyzerDialog() {
    // =====================================================
    var titleLabel = new Label(this);
    titleLabel.text = TITLE + "  —  Reference Star Method";
-   titleLabel.textAlignment = TextAlign_Center | TextAlign_VertCenter;
+   titleLabel.textAlignment = TextAlignment.Center | TextAlignment.VertCenter;
 
    // =====================================================
    // Section 1: Frames
@@ -1499,7 +1491,7 @@ function SkyQualityAnalyzerDialog() {
 
    var cameraLabel = new Label(equipGroupBox);
    cameraLabel.text = "Camera:";
-   cameraLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   cameraLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
    cameraLabel.setFixedWidth(80);
 
    this.cameraCombo = new ComboBox(equipGroupBox);
@@ -1516,7 +1508,7 @@ function SkyQualityAnalyzerDialog() {
 
    var teleLabel = new Label(equipGroupBox);
    teleLabel.text = "Telescope:";
-   teleLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   teleLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
    teleLabel.setFixedWidth(80);
 
    this.teleCombo = new ComboBox(equipGroupBox);
@@ -1533,7 +1525,7 @@ function SkyQualityAnalyzerDialog() {
 
    this.pixelScaleLabel = new Label(equipGroupBox);
    this.pixelScaleLabel.text = "Pixel Scale:  —  arcsec/px";
-   this.pixelScaleLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   this.pixelScaleLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    equipGroupBox.sizer.add(camRow);
    equipGroupBox.sizer.add(teleRow);
@@ -1552,19 +1544,19 @@ function SkyQualityAnalyzerDialog() {
    // Background ROI
    var bgLabel = new Label(measureGroupBox);
    bgLabel.text = "Background:";
-   bgLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   bgLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
    bgLabel.setFixedWidth(100);
 
    this.bgPosLabel = new Label(measureGroupBox);
    this.bgPosLabel.text = "(not selected)";
-   this.bgPosLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   this.bgPosLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    var bgSelectBtn = new PushButton(measureGroupBox);
    bgSelectBtn.text    = "Select Region...";
    bgSelectBtn.toolTip = "Click on a star-free background region (longest-exposure frame shown)";
    bgSelectBtn.onClick = function() {
       if (self.frames.length === 0) {
-         var mb = new MessageBox("Please add frames first.", TITLE, StdIcon_Warning, StdButton_Ok);
+         var mb = new MessageBox("Please add frames first.", TITLE, StdIcon.Warning, StdButton.Ok);
          mb.execute();
          return;
       }
@@ -1592,19 +1584,19 @@ function SkyQualityAnalyzerDialog() {
    // Star position
    var starPosLabel = new Label(measureGroupBox);
    starPosLabel.text = "Star Position:";
-   starPosLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   starPosLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
    starPosLabel.setFixedWidth(100);
 
    this.starPosDisplay = new Label(measureGroupBox);
    this.starPosDisplay.text = "(not selected)";
-   this.starPosDisplay.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   this.starPosDisplay.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    var starSelectBtn = new PushButton(measureGroupBox);
    starSelectBtn.text    = "Select Star...";
    starSelectBtn.toolTip = "Click on the reference star (longest-exposure frame shown)";
    starSelectBtn.onClick = function() {
       if (self.frames.length === 0) {
-         var mb = new MessageBox("Please add frames first.", TITLE, StdIcon_Warning, StdButton_Ok);
+         var mb = new MessageBox("Please add frames first.", TITLE, StdIcon.Warning, StdButton.Ok);
          mb.execute();
          return;
       }
@@ -1660,7 +1652,7 @@ function SkyQualityAnalyzerDialog() {
    // Aperture radius
    var apLabel = new Label(measureGroupBox);
    apLabel.text = "Aperture Radius:";
-   apLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   apLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
    apLabel.setFixedWidth(100);
 
    this.apertureSpinBox = new SpinBox(measureGroupBox);
@@ -1671,7 +1663,7 @@ function SkyQualityAnalyzerDialog() {
 
    var apUnitLabel = new Label(measureGroupBox);
    apUnitLabel.text = "px  (sky annulus: r+5 to r+25)";
-   apUnitLabel.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   apUnitLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    var apRow = new HorizontalSizer;
    apRow.spacing = 6;
@@ -1696,7 +1688,7 @@ function SkyQualityAnalyzerDialog() {
 
    var starNameLabel = new Label(starGroupBox);
    starNameLabel.text = "Star Name:";
-   starNameLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   starNameLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
    starNameLabel.setFixedWidth(90);
 
    this.starNameEdit = new Edit(starGroupBox);
@@ -1708,7 +1700,7 @@ function SkyQualityAnalyzerDialog() {
    searchBtn.onClick = function() {
       var name = self.starNameEdit.text.trim();
       if (name.length === 0) {
-         var mb = new MessageBox("Please enter a star name.", TITLE, StdIcon_Warning, StdButton_Ok);
+         var mb = new MessageBox("Please enter a star name.", TITLE, StdIcon.Warning, StdButton.Ok);
          mb.execute();
          return;
       }
@@ -1726,13 +1718,13 @@ function SkyQualityAnalyzerDialog() {
             var mb = new MessageBox(
                "'" + name + "' found but no V magnitude in catalog.\n"
                + "Please enter V magnitude manually.",
-               TITLE, StdIcon_Warning, StdButton_Ok);
+               TITLE, StdIcon.Warning, StdButton.Ok);
             mb.execute();
          }
       } else {
          var mb = new MessageBox(
             "'" + name + "' not found.\nPlease enter V magnitude manually.",
-            TITLE, StdIcon_Warning, StdButton_Ok);
+            TITLE, StdIcon.Warning, StdButton.Ok);
          mb.execute();
       }
    };
@@ -1745,7 +1737,7 @@ function SkyQualityAnalyzerDialog() {
 
    var vmagLabel = new Label(starGroupBox);
    vmagLabel.text = "V Magnitude:";
-   vmagLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+   vmagLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
    vmagLabel.setFixedWidth(90);
 
    this.vmagEdit = new Edit(starGroupBox);
@@ -1758,7 +1750,7 @@ function SkyQualityAnalyzerDialog() {
 
    var vmagHint = new Label(starGroupBox);
    vmagHint.text = "mag  (e.g., Vega=0.03, Tarazed=2.72, Deneb=1.25)";
-   vmagHint.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+   vmagHint.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
 
    var vmagRow = new HorizontalSizer;
    vmagRow.spacing = 6;
@@ -1802,7 +1794,7 @@ function SkyQualityAnalyzerDialog() {
    this.resultPixScaleLabel   = new Label(resultsGroupBox);
    this.resultNFramesLabel    = new Label(resultsGroupBox);
 
-   var labelStyle = TextAlign_Left | TextAlign_VertCenter;
+   var labelStyle = TextAlignment.Left | TextAlignment.VertCenter;
    this.resultSQMLabel.textAlignment       = labelStyle;
    this.resultConditionLabel.textAlignment = labelStyle;
    this.resultLSkyLabel.textAlignment      = labelStyle;
@@ -1838,10 +1830,10 @@ function SkyQualityAnalyzerDialog() {
       try {
          exportCSV(self.sqmResult, self.frames, sd.fileName);
          console.writeln("Results exported: " + sd.fileName);
-         var mb = new MessageBox("Exported:\n" + sd.fileName, TITLE, StdIcon_NoIcon, StdButton_Ok);
+         var mb = new MessageBox("Exported:\n" + sd.fileName, TITLE, StdIcon.NoIcon, StdButton.Ok);
          mb.execute();
       } catch (e) {
-         var mb = new MessageBox("Export failed:\n" + e, TITLE, StdIcon_Error, StdButton_Ok);
+         var mb = new MessageBox("Export failed:\n" + e, TITLE, StdIcon.Error, StdButton.Ok);
          mb.execute();
       }
    };
@@ -1883,11 +1875,9 @@ function SkyQualityAnalyzerDialog() {
    this.adjustToContents();
    this.updatePixelScale();
    this.updateUI();
-}
+   }
 
-SkyQualityAnalyzerDialog.prototype = new Dialog;
-
-SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function(frameData) {
+   refreshFrameTree(frameData) {
    this.frames.sort(function(a, b) { return a.exptime - b.exptime; });
    this.frameTree.clear();
    for (var i = 0; i < this.frames.length; i++) {
@@ -1920,9 +1910,9 @@ SkyQualityAnalyzerDialog.prototype.refreshFrameTree = function(frameData) {
       }
    }
    this.updateUI();
-};
+   }
 
-SkyQualityAnalyzerDialog.prototype.updateUI = function() {
+   updateUI() {
    var nf = this.frames.length;
    this.framesGroupBox.title = nf > 0
       ? "1. Frames (WBPP calibrated/debayered)  [" + nf + " frames \u2713]"
@@ -1939,9 +1929,9 @@ SkyQualityAnalyzerDialog.prototype.updateUI = function() {
       + "  [V mag " + (vmagOk ? "\u2713" : "\u2717") + "]";
 
    this.analyzeBtn.enabled = (nf >= 2 && bgOk && starOk && vmagOk);
-};
+   }
 
-SkyQualityAnalyzerDialog.prototype.updatePixelScale = function() {
+   updatePixelScale() {
    var ci = this.cameraCombo.currentItem;
    var ti = this.teleCombo.currentItem;
    if (ci < 0 || ti < 0 || ci >= gEquipment.cameras.length || ti >= gEquipment.telescopes.length) {
@@ -1957,9 +1947,9 @@ SkyQualityAnalyzerDialog.prototype.updatePixelScale = function() {
    } else {
       this.pixelScaleLabel.text = "Pixel Scale:  —  arcsec/px  (Custom: fill in pixel_pitch / focal_length)";
    }
-};
+   }
 
-SkyQualityAnalyzerDialog.prototype.clearResults = function() {
+   clearResults() {
    this.resultSQMLabel.text       = "SQM:             \u2014";
    this.resultConditionLabel.text = "Sky Condition:   \u2014";
    this.resultLSkyLabel.text      = "L_sky:           \u2014";
@@ -1969,30 +1959,30 @@ SkyQualityAnalyzerDialog.prototype.clearResults = function() {
    if (this.resultWarningLabel) this.resultWarningLabel.text = "";
    if (this.exportCSVBtn) this.exportCSVBtn.enabled = false;
    this.sqmResult = null;
-};
+   }
 
-SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
+   runAnalysis() {
    var self = this;
 
    // Validation
    if (this.frames.length < 2) {
-      var mb = new MessageBox("Please add at least 2 frames.", TITLE, StdIcon_Warning, StdButton_Ok);
+      var mb = new MessageBox("Please add at least 2 frames.", TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
    }
    if (this.bgX < 0 || this.bgY < 0) {
-      var mb = new MessageBox("Please select a background region.", TITLE, StdIcon_Warning, StdButton_Ok);
+      var mb = new MessageBox("Please select a background region.", TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
    }
    if (this.starX < 0 || this.starY < 0) {
-      var mb = new MessageBox("Please select a reference star position.", TITLE, StdIcon_Warning, StdButton_Ok);
+      var mb = new MessageBox("Please select a reference star position.", TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
    }
    if (isNaN(this.vmag)) {
       var mb = new MessageBox("Please enter or search the V magnitude of the reference star.",
-         TITLE, StdIcon_Warning, StdButton_Ok);
+         TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
    }
@@ -2001,7 +1991,7 @@ SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
    var ti = this.teleCombo.currentItem;
    if (ci < 0 || ci >= gEquipment.cameras.length ||
        ti < 0 || ti >= gEquipment.telescopes.length) {
-      var mb = new MessageBox("Please select a camera and telescope.", TITLE, StdIcon_Warning, StdButton_Ok);
+      var mb = new MessageBox("Please select a camera and telescope.", TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
    }
@@ -2013,7 +2003,7 @@ SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
       var mb = new MessageBox(
          "Custom equipment selected but pixel_pitch or focal_length is 0.\n"
          + "Please edit equipment.json or select a specific camera/telescope.",
-         TITLE, StdIcon_Warning, StdButton_Ok);
+         TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
    }
@@ -2043,7 +2033,7 @@ SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
          var mb = new MessageBox(
             "Analysis failed. Not enough valid frames (need ≥2).\n"
             + "Check that EXPTIME is in FITS headers and the ROI/star positions are within the image.",
-            TITLE, StdIcon_Error, StdButton_Ok);
+            TITLE, StdIcon.Error, StdButton.Ok);
          mb.execute();
          this.analyzeBtn.enabled = true;
          return;
@@ -2096,11 +2086,12 @@ SkyQualityAnalyzerDialog.prototype.runAnalysis = function() {
       this.exportCSVBtn.enabled = true;
 
    } catch (e) {
-      var mb = new MessageBox("Unexpected error:\n" + e, TITLE, StdIcon_Error, StdButton_Ok);
+      var mb = new MessageBox("Unexpected error:\n" + e, TITLE, StdIcon.Error, StdButton.Ok);
       mb.execute();
    }
 
    this.analyzeBtn.enabled = true;
+   }
 };
 
 //============================================================================
