@@ -180,6 +180,76 @@ assertClose(math.normalizedToADU(0.008, 16), 524.28,     1,  "16bit: 0.008 ≈ 5
 assertClose(math.normalizedToADU(1.0, 32),   4294967295, 1,  "32bit: max");
 
 // ============================================================
+// sigmaClippingStats: mean field
+// ============================================================
+console.log("\n--- sigmaClippingStats: mean ---");
+
+var symData = [98, 99, 100, 101, 102];
+var rSym = math.sigmaClippingStats(symData, 3, 10);
+assertClose(rSym.mean, 100, 0.01, "symmetric data: mean = 100");
+assertClose(rSym.median, 100, 0.01, "symmetric data: median = 100");
+
+// With positive outliers clipped: need enough normal values for sigma to be tight
+// normal=[97..103 x10] + [500, 1000]: std of normal ≈ 2, so 3σ ≈ 6 → clips 500, 1000
+var dataWithOutlier = [98, 99, 100, 101, 102, 103, 97, 100, 101, 102, 500, 1000];
+var rOut = math.sigmaClippingStats(dataWithOutlier, 3, 10);
+assert(rOut.mean < 200, "outlier clipped: mean < 200 after clipping");
+assert(rOut.count < dataWithOutlier.length, "outlier clipped: count reduced");
+
+// SExtractor mode: 2.5*median - 1.5*mean
+// For symmetric data: mode ≈ median ≈ mean
+var modeSymm = 2.5 * rSym.median - 1.5 * rSym.mean;
+assertClose(modeSymm, 100, 0.01, "SExtractor mode ≈ 100 for symmetric data");
+
+// For data with bright stars (positive skew), mode < median
+var skewedData = [98, 99, 100, 101, 102, 120, 150, 180]; // faint stars in annulus
+var rSkew = math.sigmaClippingStats(skewedData, 3, 10);
+var modeSkew = 2.5 * rSkew.median - 1.5 * rSkew.mean;
+assert(modeSkew < rSkew.median, "SExtractor mode < median when bright stars present");
+
+// ============================================================
+// computeLStar: saturation frame exclusion
+// ============================================================
+console.log("\n--- computeLStar: saturation exclusion ---");
+
+var framesWithSat = [
+    { exptime: 1,  adu_star: 200000,   saturated_fraction: 0.00 },
+    { exptime: 2,  adu_star: 400000,   saturated_fraction: 0.00 },
+    { exptime: 4,  adu_star: 800000,   saturated_fraction: 0.05 },
+    { exptime: 8,  adu_star: 1200000,  saturated_fraction: 0.45 },  // excluded
+    { exptime: 16, adu_star: 1200000,  saturated_fraction: 0.90 }   // excluded
+];
+
+// Default satThreshold = 0.3: frames with sat > 0.3 excluded
+var starSat = math.computeLStar(framesWithSat);
+assert(starSat.excluded_frames === 2, "2 frames excluded (sat > 0.3)");
+assertClose(starSat.L_star, 200000, 5000, "L_star correct with saturated frames excluded");
+assert(starSat.r2 > 0.99, "R² > 0.99 after excluding saturated frames");
+
+// Custom threshold 0.04: 3 frames excluded (sat 0.05, 0.45, 0.90 all > 0.04)
+var starSat2 = math.computeLStar(framesWithSat, 0.04);
+assert(starSat2.excluded_frames === 3, "3 frames excluded with threshold=0.04");
+
+// No saturated_fraction field: treated as 0 (not excluded)
+var framesNoSatField = [
+    { exptime: 1,  adu_star: 200000 },
+    { exptime: 2,  adu_star: 400000 },
+    { exptime: 4,  adu_star: 800000 }
+];
+var starNoSat = math.computeLStar(framesNoSatField);
+assert(starNoSat.excluded_frames === 0, "no excluded frames when saturated_fraction absent");
+assertClose(starNoSat.L_star, 200000, 100, "L_star correct when no sat field");
+
+// All frames saturated → NaN
+var allSat = [
+    { exptime: 1,  adu_star: 65535, saturated_fraction: 0.80 },
+    { exptime: 2,  adu_star: 65535, saturated_fraction: 0.95 }
+];
+var starAllSat = math.computeLStar(allSat);
+assert(isNaN(starAllSat.L_star), "all frames saturated: L_star = NaN");
+assert(starAllSat.excluded_frames === 2, "all frames saturated: excluded_frames = 2");
+
+// ============================================================
 // Summary
 // ============================================================
 console.log("\n============================");
