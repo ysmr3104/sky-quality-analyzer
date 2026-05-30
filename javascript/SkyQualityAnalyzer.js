@@ -232,7 +232,7 @@ function readXISFHeaderWCS(filepath, imageHeight) {
       dbg("  file opened OK, size=" + f.size);
 
       // Read and verify XISF signature (8 bytes: "XISF0100")
-      var sig = f.read(DataType_ByteArray, 8);
+      var sig = f.read(DataType.ByteArray, 8);
       dbg("  typeof sig=" + typeof sig + " sig.length=" + (sig ? sig.length : "null"));
 
       // ByteArray in PJSR may use .at() instead of []
@@ -248,7 +248,7 @@ function readXISFHeaderWCS(filepath, imageHeight) {
       }
 
       // Read header length (uint32 LE, 4 bytes)
-      var lb = f.read(DataType_ByteArray, 4);
+      var lb = f.read(DataType.ByteArray, 4);
       var lb0 = (lb.at !== undefined) ? lb.at(0) : lb[0];
       var lb1 = (lb.at !== undefined) ? lb.at(1) : lb[1];
       var lb2 = (lb.at !== undefined) ? lb.at(2) : lb[2];
@@ -257,12 +257,12 @@ function readXISFHeaderWCS(filepath, imageHeight) {
       dbg("  hdrLen=" + hdrLen);
 
       // Skip 4 reserved bytes
-      f.read(DataType_ByteArray, 4);
+      f.read(DataType.ByteArray, 4);
 
       // Read the full XML header (WCS keywords may appear anywhere in the header)
       var readLimit = hdrLen;
       dbg("  reading " + readLimit + " bytes of XML header");
-      var xmlBytes = f.read(DataType_ByteArray, readLimit);
+      var xmlBytes = f.read(DataType.ByteArray, readLimit);
       f.close();
       dbg("  xmlBytes.length=" + xmlBytes.length);
 
