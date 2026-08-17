@@ -37,6 +37,14 @@ Python や外部パッケージは不要です。
 
 詳細は [docs/specs.md](docs/specs.md) を参照してください。
 
+## 支援について
+
+このスクリプトは無料で公開しており、今後も無料のままです。役に立った、開発を続けてほしいと思っていただけたら、GitHub Sponsors から支援いただけます。
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-ysmr3104-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/ysmr3104)
+
+支援は任意です。バグ報告や機能要望も同じくらいありがたいです。
+
 ## ライセンス
 
 このプロジェクトは [MIT ライセンス](LICENSE) の下で公開されています。
