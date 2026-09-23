@@ -54,7 +54,11 @@ for SCRIPT_REL in "$@"; do
     echo "  log:    $LOG_FILE"
 
     # PixInsight を automation-mode で実行
+    # -n: 新規インスタンスとして起動する(GUIが起動中でも並行実行できる)
+    # --no-splash: スプラッシュ画面を出さない
     "$PIXINSIGHT" \
+        -n \
+        --no-splash \
         --automation-mode \
         -r="$SCRIPT_ABS" \
         --force-exit \
