@@ -7,4 +7,3 @@ tests/fixtures/xisf/
 
 # PJSR テスト結果（実行時生成）
 tests/pjsr/results/
-tests/pjsr/results*.log

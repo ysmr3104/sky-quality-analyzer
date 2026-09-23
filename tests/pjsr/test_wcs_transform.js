@@ -1,5 +1,9 @@
+#engine v8
 // test_wcs_transform.js
-// PJSR test: raDecToPixel() / pixelToRaDec() — WCS round-trip using real frame WCS
+// PJSR test: native astrometric solution (ImageWindow.celestialToImage /
+// imageToCelestial) — verified against an independent criterion (does the
+// projected position actually land on the star), not by round-tripping
+// through the same transform.
 //
 // Run:
 //   bash tests/pjsr/run_pjsr_tests.sh tests/pjsr/test_wcs_transform.js
@@ -12,73 +16,116 @@ var PROJECT_ROOT = File.extractDrive(#__FILE__) + File.extractDirectory(#__FILE_
 var FIXTURE_DIR  = PROJECT_ROOT + "tests/fixtures/xisf/";
 var RESULT_PATH  = PROJECT_ROOT + "tests/pjsr/results/test_wcs_transform_result.json";
 
-// Use the 1s frame (plate-solved, WCS in binary XISF header)
+// Kochab (beta UMi), J2000 catalog position — independent of anything the
+// script itself computes.
+var KOCHAB_RA  = 222.676357;
+var KOCHAB_DEC = 74.155505;
+
 var FRAME_1S = FIXTURE_DIR +
     "Light_Kochab_1.0s_Bin1_294MC_IRUV_gain120_20260327-000325_356deg_-10.0C_0005_c_d.xisf";
+var FRAME_10S = FIXTURE_DIR +
+    "Light_Kochab_10.0s_Bin1_294MC_IRUV_gain120_20260327-001000_359deg_-10.0C_0005_c_d.xisf";
 
-// ============================================================
-// Load WCS from the 1s frame
-// ============================================================
-var wcs = null;
+var STAR_APERTURE = 15; // px, same as the script's default aperture radius
 
-test("readFrameMetadata: WCS present in 1s frame", function() {
-    var meta = readFrameMetadata(FRAME_1S);
-    assertTrue(meta !== null, "readFrameMetadata returned null");
-    assertTrue(meta.wcs !== null, "WCS should be present in plate-solved XISF");
-    wcs = meta.wcs;
-    console.writeln("  CRPIX1=" + wcs.crpix1.toFixed(1) + " CRPIX2=" + wcs.crpix2.toFixed(1));
-    console.writeln("  CRVAL1=" + wcs.crval1.toFixed(4) + " CRVAL2=" + wcs.crval2.toFixed(4));
-    console.writeln("  CD1_1=" + wcs.cd11.toFixed(6) + " CD2_2=" + wcs.cd22.toFixed(6));
+// Project Kochab's catalog RA/Dec onto the frame with celestialToImage(), then
+// confirm the projected position actually sits on the star: the max G-channel
+// (ch 1) value within STAR_APERTURE px must exceed the surrounding background
+// annulus median by >= 0.5 (normalized pixel value, 0-1 range).
+function assertStarAtProjectedPosition(filepath, label) {
+    var wins = ImageWindow.open(filepath);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed: " + filepath);
+    var win = wins[0];
+    try {
+        assertEqual(win.hasAstrometricSolution, true, label + ": hasAstrometricSolution should be true");
+
+        var pt = win.celestialToImage(KOCHAB_RA, KOCHAB_DEC);
+        assertTrue(pt !== null, label + ": celestialToImage returned null");
+        log("  " + label + ": celestialToImage(Kochab) = ("
+            + pt.x.toFixed(2) + ", " + pt.y.toFixed(2) + ")");
+
+        var image = win.mainView.image;
+        var ch = 1; // G channel
+        var cx = pt.x;
+        var cy = pt.y;
+        var r  = STAR_APERTURE;
+
+        // Aperture pixels (same PCL pixel-center convention as aperturePhotometry).
+        var apVals = [];
+        var yLo = Math.floor(cy - r) - 1, yHi = Math.ceil(cy + r) + 1;
+        var xLo = Math.floor(cx - r) - 1, xHi = Math.ceil(cx + r) + 1;
+        for (var y = yLo; y <= yHi; y++) {
+            if (y < 0 || y >= image.height) continue;
+            for (var x = xLo; x <= xHi; x++) {
+                if (x < 0 || x >= image.width) continue;
+                var dx = (x + 0.5) - cx;
+                var dy = (y + 0.5) - cy;
+                if (Math.sqrt(dx * dx + dy * dy) <= r) apVals.push(image.sample(x, y, ch));
+            }
+        }
+
+        // Background annulus (same r_in/r_out as aperturePhotometry's default aperture).
+        var rIn = r + 5, rOut = r + 25;
+        var ringVals = [];
+        var ryLo = Math.floor(cy - rOut) - 1, ryHi = Math.ceil(cy + rOut) + 1;
+        var rxLo = Math.floor(cx - rOut) - 1, rxHi = Math.ceil(cx + rOut) + 1;
+        for (var y = ryLo; y <= ryHi; y++) {
+            if (y < 0 || y >= image.height) continue;
+            for (var x = rxLo; x <= rxHi; x++) {
+                if (x < 0 || x >= image.width) continue;
+                var dx = (x + 0.5) - cx;
+                var dy = (y + 0.5) - cy;
+                var dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist >= rIn && dist <= rOut) ringVals.push(image.sample(x, y, ch));
+            }
+        }
+
+        assertTrue(apVals.length > 0,   label + ": no aperture pixels sampled");
+        assertTrue(ringVals.length > 0, label + ": no background ring pixels sampled");
+
+        var maxVal = apVals[0];
+        for (var i = 1; i < apVals.length; i++) {
+            if (apVals[i] > maxVal) maxVal = apVals[i];
+        }
+        var bgMedian = median(ringVals);
+
+        log("  " + label + ": max=" + maxVal.toFixed(5)
+            + " bgMedian=" + bgMedian.toFixed(5) + " diff=" + (maxVal - bgMedian).toFixed(5));
+        assertTrue(maxVal - bgMedian >= 0.5, label + ": max aperture value ("
+            + maxVal.toFixed(5) + ") should exceed background median ("
+            + bgMedian.toFixed(5) + ") by >= 0.5 — projected position should land on the star");
+    } finally {
+        win.forceClose();
+    }
+}
+
+test("celestialToImage(Kochab) lands on the star — 1s frame", function() {
+    assertStarAtProjectedPosition(FRAME_1S, "1s");
 });
 
-// ============================================================
-// Round-trip: pixel → RA/Dec → pixel (CRPIX should map to CRVAL)
-// ============================================================
-// CRPIX is a FITS 1-indexed coordinate.
-// PixInsight pixel corresponding to CRPIX:
-//   px_pi = crpix1 - 1          (x: FITS 1-indexed → PixInsight 0-indexed)
-//   py_pi = imageHeight - crpix2 (y: FITS y-up → PixInsight y-down)
-test("pixelToRaDec(CRPIX) returns CRVAL", function() {
-    assertTrue(wcs !== null, "WCS not loaded (previous test failed)");
-    var crPixPx = wcs.crpix1 - 1;
-    var crPixPy = wcs.imageHeight - wcs.crpix2;
-    var pos = pixelToRaDec(wcs, crPixPx, crPixPy);
-    assertTrue(pos !== null, "pixelToRaDec returned null");
-    console.writeln("  CRPIX in PI coords: px=" + crPixPx.toFixed(1) + " py=" + crPixPy.toFixed(1));
-    console.writeln("  pixelToRaDec(CRPIX): RA=" + pos.ra.toFixed(4) + " Dec=" + pos.dec.toFixed(4));
-    assertEqual(pos.ra,  wcs.crval1, "RA at CRPIX should equal CRVAL1",  0.01);
-    assertEqual(pos.dec, wcs.crval2, "Dec at CRPIX should equal CRVAL2", 0.01);
+test("celestialToImage(Kochab) lands on the star — 10s frame", function() {
+    assertStarAtProjectedPosition(FRAME_10S, "10s");
 });
 
-test("raDecToPixel(CRVAL) returns CRPIX", function() {
-    assertTrue(wcs !== null, "WCS not loaded (previous test failed)");
-    var px = raDecToPixel(wcs, wcs.crval1, wcs.crval2);
-    assertTrue(px !== null, "raDecToPixel returned null");
-    console.writeln("  raDecToPixel(CRVAL): px=" + px.px.toFixed(1) + " py=" + px.py.toFixed(1));
-    // Expected PixInsight pixel for CRPIX:
-    //   px_expected = round(crpix1 - 1),  py_expected = round(imageHeight - crpix2)
-    var expPx = Math.round(wcs.crpix1 - 1);
-    var expPy = Math.round(wcs.imageHeight - wcs.crpix2);
-    assertEqual(px.px, expPx, "px at CRVAL should equal CRPIX1 - 1", 1.0);
-    assertEqual(px.py, expPy, "py at CRVAL should equal imageHeight - CRPIX2", 1.0);
-});
-
-// ============================================================
-// Round-trip: arbitrary pixel → RA/Dec → pixel
-// ============================================================
-test("raDecToPixel(pixelToRaDec(px)) round-trip", function() {
-    assertTrue(wcs !== null, "WCS not loaded (previous test failed)");
-    var origX = 500;
-    var origY = 800;
-    var pos = pixelToRaDec(wcs, origX, origY);
-    assertTrue(pos !== null, "pixelToRaDec returned null");
-    var back = raDecToPixel(wcs, pos.ra, pos.dec);
-    assertTrue(back !== null, "raDecToPixel returned null");
-    console.writeln("  orig=(" + origX + "," + origY + ")"
-        + "  pos=(" + pos.ra.toFixed(4) + "," + pos.dec.toFixed(4) + ")"
-        + "  back=(" + back.px.toFixed(1) + "," + back.py.toFixed(1) + ")");
-    assertEqual(back.px, origX, "round-trip X", 1.0);
-    assertEqual(back.py, origY, "round-trip Y", 1.0);
+// Auxiliary: imageToCelestial() -> celestialToImage() should round-trip within 0.1 px.
+test("imageToCelestial / celestialToImage round-trip within 0.1 px", function() {
+    var wins = ImageWindow.open(FRAME_1S);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
+    var win = wins[0];
+    try {
+        var origX = 500, origY = 800;
+        var celestial = win.imageToCelestial(origX, origY);
+        assertTrue(celestial !== null, "imageToCelestial returned null");
+        var back = win.celestialToImage(celestial.x, celestial.y);
+        assertTrue(back !== null, "celestialToImage returned null");
+        log("  orig=(" + origX + "," + origY + ")"
+            + "  celestial=(" + celestial.x.toFixed(4) + "," + celestial.y.toFixed(4) + ")"
+            + "  back=(" + back.x.toFixed(2) + "," + back.y.toFixed(2) + ")");
+        assertEqual(back.x, origX, "round-trip X", 0.1);
+        assertEqual(back.y, origY, "round-trip Y", 0.1);
+    } finally {
+        win.forceClose();
+    }
 });
 
 runAllTests(RESULT_PATH);
