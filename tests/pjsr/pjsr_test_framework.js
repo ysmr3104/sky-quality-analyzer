@@ -150,7 +150,8 @@ function runAllTests(outputPath) {
 
     // ログファイルに全コンソール出力を書き出す
     var baseName = File.extractName(outputPath);  // e.g. "test_foo_result"
-    var logPath = dir + baseName.replace(/_result$/, "") + ".log";
+    // File.extractDirectory() の戻り値は末尾に "/" が付かない
+    var logPath = dir + "/" + baseName.replace(/_result$/, "") + ".log";
     var lf = new File();
     lf.createForWriting(logPath);
     lf.outText(_logLines.join("\n"));
