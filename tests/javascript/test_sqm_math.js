@@ -212,25 +212,52 @@ assert(modeSkew < rSkew.median, "SExtractor mode < median when bright stars pres
 // ============================================================
 console.log("\n--- computeLStar: saturation exclusion ---");
 
+// MAX_SAT_FRACTION is the single source of truth for the exclusion threshold
+// (issue #13: area-based fill-in for saturated pixels always underestimates
+// flux, so any frame with a saturated pixel is excluded — threshold is 0).
+assertClose(math.MAX_SAT_FRACTION, 0, 0, "MAX_SAT_FRACTION default is 0");
+
 var framesWithSat = [
     { exptime: 1,  adu_star: 200000,   saturated_fraction: 0.00 },
     { exptime: 2,  adu_star: 400000,   saturated_fraction: 0.00 },
-    { exptime: 4,  adu_star: 800000,   saturated_fraction: 0.05 },
-    { exptime: 8,  adu_star: 1200000,  saturated_fraction: 0.45 },  // excluded
-    { exptime: 16, adu_star: 1200000,  saturated_fraction: 0.90 }   // excluded
+    { exptime: 4,  adu_star: 800000,   saturated_fraction: 0.05 },  // excluded (sat > 0)
+    { exptime: 8,  adu_star: 1200000,  saturated_fraction: 0.45 },  // excluded (sat > 0)
+    { exptime: 16, adu_star: 1200000,  saturated_fraction: 0.90 }   // excluded (sat > 0)
 ];
 
-// Default satThreshold = 0.3: frames with sat > 0.3 excluded
+// Default satThreshold = MAX_SAT_FRACTION = 0: any frame with saturated_fraction > 0 is excluded
 var starSat = math.computeLStar(framesWithSat);
-assert(starSat.excluded_frames === 2, "2 frames excluded (sat > 0.3)");
-assertClose(starSat.L_star, 200000, 5000, "L_star correct with saturated frames excluded");
-assert(starSat.r2 > 0.99, "R² > 0.99 after excluding saturated frames");
+assert(starSat.excluded_frames === 3, "3 frames excluded (sat > 0, new default threshold)");
+assertClose(starSat.L_star, 200000, 1, "L_star correct with saturated frames excluded");
+assertClose(starSat.r2, 1.0, 0.001, "R² = 1.0 with the 2 remaining unsaturated frames");
 
-// Custom threshold 0.04: 3 frames excluded (sat 0.05, 0.45, 0.90 all > 0.04)
-var starSat2 = math.computeLStar(framesWithSat, 0.04);
-assert(starSat2.excluded_frames === 3, "3 frames excluded with threshold=0.04");
+// saturated_fraction === 0 (exactly): not excluded, still used in the fit
+// (already verified above: the 2 frames with saturated_fraction=0.00 both
+// contributed to starSat's L_star/r2 — this test makes that explicit).
+var framesExactlyZero = [
+    { exptime: 1, adu_star: 200000, saturated_fraction: 0 },
+    { exptime: 2, adu_star: 400000, saturated_fraction: 0 },
+    { exptime: 4, adu_star: 800000, saturated_fraction: 0 }
+];
+var starExactlyZero = math.computeLStar(framesExactlyZero);
+assert(starExactlyZero.excluded_frames === 0, "saturated_fraction=0 is never excluded");
+assertClose(starExactlyZero.L_star, 200000, 1, "L_star correct when saturated_fraction=0 for all frames");
 
-// No saturated_fraction field: treated as 0 (not excluded)
+// Legacy/explicit threshold still works as an opt-in override (e.g. 0.3, the old default)
+var starSatLegacyThreshold = math.computeLStar(framesWithSat, 0.3);
+assert(starSatLegacyThreshold.excluded_frames === 2, "explicit threshold=0.3 excludes only sat > 0.3");
+
+// Excluding down to < 2 usable frames → NaN
+var framesMostlySat = [
+    { exptime: 1, adu_star: 200000, saturated_fraction: 0.00 },
+    { exptime: 2, adu_star: 400000, saturated_fraction: 0.05 },  // excluded
+    { exptime: 4, adu_star: 800000, saturated_fraction: 0.10 }   // excluded
+];
+var starMostlySat = math.computeLStar(framesMostlySat);
+assert(isNaN(starMostlySat.L_star), "fewer than 2 usable frames (default threshold): L_star = NaN");
+assert(starMostlySat.excluded_frames === 2, "2 frames excluded, 1 remaining (< 2 needed)");
+
+// No saturated_fraction field: treated as 0 (not excluded), independent of threshold
 var framesNoSatField = [
     { exptime: 1,  adu_star: 200000 },
     { exptime: 2,  adu_star: 400000 },

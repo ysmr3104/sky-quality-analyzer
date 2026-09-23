@@ -678,11 +678,17 @@ FITS ヘッダーの `XBINNING` / `YBINNING` から取得し、ピクセルス�
    - 各フレームの同座標で開口測光（アパーチャ半径はユーザー指定）
      - プレートソルブ済みフレームは WCS でフレームごとに星位置を補正
      - アニュラス内の背景: SExtractor Mode 推定（2.5×median − 1.5×mean）
-     - 飽和ピクセル（≥ 0.97×maxADU）はアパーチャ積算からスキップ
-     - ADU_star = 飽和マスキング済み net flux（全アパーチャ面積にスケール）
-     - 飽和率（saturated_fraction）を各フレームで記録
-   - 飽和率 > 30% のフレームを自動除外した上で線形フィット
+     - ADU_star = アパーチャ内の全ピクセル合計 − skyBg × 全ピクセル数
+       （飽和ピクセル（≥ 0.97×maxADU）も合計に含める。飽和するのは星の中心の
+       最も明るい画素であり、周辺の平均で埋める面積スケーリングは必ず過小評価
+       になるため採用しない）
+     - 飽和ピクセル数（saturated_pixels）と飽和率（saturated_fraction）を各フレームで記録
+   - アパーチャ内に飽和ピクセルが 1 つでもあるフレーム（saturated_fraction > 0）を
+     線形フィットから自動除外する（`MAX_SAT_FRACTION`、`sqm_math.js`）
    - 傾き = L_star [counts/s]、R² で線形性を確認（除外フレーム数を表示）
+   - 除外されなかったフレームについて、レート（adu_star / exptime）の中央値からの
+     ずれが `RATE_DEV_WARN`（5%）を超える場合は警告を表示する（フィットからは
+     除外しない。閾値は #19 で実測してから見直す）
 
 5. SQM 算出
    - L'_sky = L_sky / pixel_scale²   [counts/arcsec²/s]
@@ -719,12 +725,19 @@ var adu = image.sample(x, y, channel) * maxADU;
   ※ mode ≤ 0 の場合は median にフォールバック
   （アニュラス内の微かな星による median の底上げを補正）
 
-飽和ピクセルマスキング:
-  アパーチャ内のピクセルが SAT_THRESHOLD（0.97 × maxADU）以上の場合はスキップ
-  net flux = (非飽和ピクセル合計 − skyBg × 非飽和数) × (全ピクセル数 / 非飽和数)
-  saturated_fraction = 飽和ピクセル数 / 全アパーチャピクセル数
+飽和ピクセルの扱い（Issue #13）:
+  アパーチャ内のピクセルが SAT_THRESHOLD（0.97 × maxADU）以上かどうかを判定するが、
+  積算からは除外しない。飽和するのは星の中心の最も明るい画素であり、周辺ピクセルの
+  平均で埋めて全アパーチャ面積にスケールする方式は必ず過小評価になるため（Issue #13）。
+  net flux = 全アパーチャピクセル合計 − skyBg × 全アパーチャピクセル数
+  saturated_pixels   = 飽和ピクセル数
+  saturated_fraction = saturated_pixels / 全アパーチャピクセル数
 
-ADU_star = net flux（飽和マスキング済み）
+ADU_star = net flux（飽和ピクセルも含めた全画素の合計から算出）
+
+アパーチャ内に飽和ピクセルが 1 つでもある（saturated_fraction > 0）フレームは、
+L_star の線形フィットから除外する（`MAX_SAT_FRACTION = 0`、`sqm_math.js` に定義し
+`SkyQualityAnalyzer.js` はこれを参照する）。
 ```
 
 ピントをボカして撮影するため（6.2節参照）、アパーチャ半径を大きめに設定します。

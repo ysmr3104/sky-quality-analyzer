@@ -23,6 +23,11 @@
 #define MAX_BMP_EDGE 1200
 #define BG_HALF      32    // Background ROI: 64x64 px (half = 32)
 #define SAT_THRESHOLD 0.97 // Pixel saturation threshold (fraction of maxADU)
+#define RATE_DEV_WARN 0.05 // Warn (but do not exclude) when |rate/median - 1| exceeds this.
+                           // adu_star/exptime should be constant across frames; a large
+                           // deviation flags non-linearity. Kept as a warning-only threshold
+                           // for now (not an exclusion) because faint stars can exceed 5% from
+                           // noise alone — see issue #19 for tightening this once measured.
 
 CoreApplication.ensureMinimumVersion(1, 9, 4);
 
@@ -986,11 +991,18 @@ function measureBackground(filepath, bgX, bgY, bitsPerSample, sqmChannel) {
 
 //============================================================================
 // Aperture photometry
-// Returns { adu_star, saturated_fraction, starX, starY }
-// - adu_star: net star flux (aperture sum minus sky background).
-//   Saturated pixels are excluded; flux is scaled to full aperture area.
+// Returns { adu_star, saturated_fraction, saturated_pixels, starX, starY, skyBg }
+// - adu_star: net star flux (full aperture sum minus sky background), i.e.
+//   aperSum_all - skyBg * apCount. Saturated pixels are NOT excluded/scaled:
+//   they sit at the star's brightest peak, so filling them in from the
+//   surrounding (dimmer) average always underestimates the true flux. Frames
+//   with any saturated pixel in the aperture are instead excluded from the
+//   L_star fit entirely (see MAX_SAT_FRACTION in sqm_math.js, issue #13).
 // - saturated_fraction: fraction of aperture pixels at or above SAT_THRESHOLD.
-//   Frames with saturated_fraction > 0.3 are excluded from the L_star fit.
+// - saturated_pixels: absolute count of aperture pixels at or above SAT_THRESHOLD.
+// - skyBg: the sky background estimate (SExtractor mode) used for the subtraction,
+//   returned so callers/tests can verify adu_star independently without
+//   recomputing the annulus statistics.
 // - starX/starY: the fractional center actually used for this frame — the
 //   WCS-projected position (via celestialToImage) when starRaDec is given and
 //   this frame has an astrometric solution, otherwise the starX/starY passed in.
@@ -1057,7 +1069,7 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
       var skyBg = 2.5 * skyStats.median - 1.5 * skyStats.mean;
       if (skyBg <= 0) skyBg = skyStats.median;  // fallback for pathological cases
 
-      // Aperture sum with saturation masking
+      // Aperture sum — ALL pixels included (no saturation fill-in; see header comment above)
       var aperSum  = 0;
       var apCount  = 0;
       var satCount = 0;
@@ -1076,25 +1088,22 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
             if (dx * dx + dy * dy <= r_ap * r_ap) {
                apCount++;
                var pixADU = image.sample(x, y, ch) * maxADU;
-               if (pixADU >= satLimit) {
-                  satCount++;
-               } else {
-                  aperSum += pixADU;
-               }
+               if (pixADU >= satLimit) satCount++;
+               aperSum += pixADU;
             }
          }
       }
 
-      var usedCount = apCount - satCount;
-      var netFlux;
-      if (usedCount <= 0) {
-         netFlux = NaN;
-      } else {
-         // Net flux from non-saturated pixels, scaled to full aperture area
-         netFlux = (aperSum - skyBg * usedCount) * (apCount / usedCount);
-      }
+      var netFlux = (apCount > 0) ? (aperSum - skyBg * apCount) : NaN;
       var saturated_fraction = (apCount > 0) ? (satCount / apCount) : 0;
-      return { adu_star: netFlux, saturated_fraction: saturated_fraction, starX: cx, starY: cy };
+      return {
+         adu_star:            netFlux,
+         saturated_fraction:  saturated_fraction,
+         saturated_pixels:    satCount,
+         starX:               cx,
+         starY:               cy,
+         skyBg:               skyBg
+      };
    } finally {
       // Always release the window, even if projection or sampling throws.
       win.close();
@@ -1134,12 +1143,22 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       }
 
       var satPct = Math.round((ap.saturated_fraction || 0) * 100);
-      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%%  starXY=(%.1f,%.1f)",
-         f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, ap.starX, ap.starY));
+      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%% (%d px)  starXY=(%.1f,%.1f)",
+         f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, ap.saturated_pixels || 0, ap.starX, ap.starY));
 
       skyFrameData.push({ exptime: f.exptime, adu_sky: bg.adu_sky });
-      starFrameData.push({ exptime: f.exptime, adu_star: ap.adu_star, saturated_fraction: ap.saturated_fraction || 0 });
-      frameResults.push({ filename: f.filename, exptime: f.exptime, adu_star: ap.adu_star, saturated_fraction: ap.saturated_fraction || 0 });
+      starFrameData.push({
+         exptime:             f.exptime,
+         adu_star:            ap.adu_star,
+         saturated_fraction:  ap.saturated_fraction || 0
+      });
+      frameResults.push({
+         filename:            f.filename,
+         exptime:             f.exptime,
+         adu_star:            ap.adu_star,
+         saturated_fraction:  ap.saturated_fraction || 0,
+         saturated_pixels:    ap.saturated_pixels || 0
+      });
    }
 
    if (skyFrameData.length < 2) return null;
@@ -1150,31 +1169,59 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    var sqm         = computeSQM(lStarResult.L_star, lPrimeSky, vmag);
    var label       = skyConditionLabel(sqm);
 
-   // Tag each frame as used (not saturated) or excluded
-   var satThreshold = 0.3;
+   // Tag each frame as used (no saturated pixels in the aperture) or excluded.
+   // Uses the same threshold as computeLStar()'s own exclusion criterion
+   // (MAX_SAT_FRACTION, defined in sqm_math.js) so the two never disagree.
    for (var k = 0; k < frameResults.length; k++) {
-      frameResults[k].used = (frameResults[k].saturated_fraction <= satThreshold);
+      frameResults[k].used = (frameResults[k].saturated_fraction <= MAX_SAT_FRACTION);
+   }
+
+   // Linearity check (warning only, not an exclusion — see RATE_DEV_WARN comment above):
+   // for frames used in the L_star fit, adu_star/exptime should be a constant rate.
+   // Flag frames whose rate deviates from the median rate by more than RATE_DEV_WARN.
+   var usedRates = [];
+   for (var k = 0; k < frameResults.length; k++) {
+      if (frameResults[k].used) {
+         usedRates.push(frameResults[k].adu_star / frameResults[k].exptime);
+      }
+   }
+   var rateMedian = (usedRates.length > 0) ? median(usedRates) : NaN;
+   var nonlinearFrames = [];
+   for (var k = 0; k < frameResults.length; k++) {
+      if (!frameResults[k].used || usedRates.length === 0 || rateMedian === 0) {
+         frameResults[k].rate_deviation = null;
+         frameResults[k].nonlinear = false;
+         continue;
+      }
+      var rate = frameResults[k].adu_star / frameResults[k].exptime;
+      var dev  = rate / rateMedian - 1;
+      frameResults[k].rate_deviation = dev;
+      frameResults[k].nonlinear = (Math.abs(dev) > RATE_DEV_WARN);
+      if (frameResults[k].nonlinear) {
+         nonlinearFrames.push(frameResults[k].filename + " (" + (dev * 100).toFixed(1) + "%)");
+      }
    }
 
    return {
-      L_sky:           lSkyResult.L_sky,
-      r2_sky:          lSkyResult.r2,
-      L_star:          lStarResult.L_star,
-      r2_star:         lStarResult.r2,
-      L_prime_sky:     lPrimeSky,
-      pixel_scale:     pixelScale,
-      sqm:             sqm,
-      label:           label,
-      n_frames:        skyFrameData.length,
-      excluded_frames: lStarResult.excluded_frames || 0,
-      frameData:       frameResults,
-      sqmChannel:      sqmChannel,
-      bgX:             bgX,
-      bgY:             bgY,
-      starX:           starX,
-      starY:           starY,
-      aperture:        aperture,
-      vmag:            vmag
+      L_sky:            lSkyResult.L_sky,
+      r2_sky:           lSkyResult.r2,
+      L_star:           lStarResult.L_star,
+      r2_star:          lStarResult.r2,
+      L_prime_sky:      lPrimeSky,
+      pixel_scale:      pixelScale,
+      sqm:              sqm,
+      label:            label,
+      n_frames:         skyFrameData.length,
+      excluded_frames:  lStarResult.excluded_frames || 0,
+      nonlinear_frames: nonlinearFrames,
+      frameData:        frameResults,
+      sqmChannel:       sqmChannel,
+      bgX:              bgX,
+      bgY:              bgY,
+      starX:            starX,
+      starY:            starY,
+      aperture:         aperture,
+      vmag:             vmag
    };
 }
 
@@ -1260,7 +1307,7 @@ constructor() {
    this.frameTree.setColumnWidth(2, 70);
    this.frameTree.setColumnWidth(3, 45);
    this.frameTree.setColumnWidth(4, 90);
-   this.frameTree.setColumnWidth(5, 50);
+   this.frameTree.setColumnWidth(5, 90);
    this.frameTree.setColumnWidth(6, 80);
    this.frameTree.setHeaderText(0, "Filename");
    this.frameTree.setHeaderText(1, "Exp (s)");
@@ -1788,10 +1835,12 @@ constructor() {
          for (var j = 0; j < frameData.length; j++) {
             if (frameData[j].filename === f.filename) {
                var fd = frameData[j];
-               var satPct = Math.round(fd.saturated_fraction * 100);
+               var satPct = (fd.saturated_fraction * 100).toFixed(1);
+               var satPx  = fd.saturated_pixels || 0;
+               var status = !fd.used ? "Sat" : (fd.nonlinear ? "Nonlin" : "OK");
                node.setText(4, isNaN(fd.adu_star) ? "\u2014" : Math.round(fd.adu_star).toString());
-               node.setText(5, satPct + "%");
-               node.setText(6, fd.used ? "OK" : "Sat");
+               node.setText(5, satPct + "% (" + satPx + ")");
+               node.setText(6, status);
                filled = true;
                break;
             }
@@ -1970,8 +2019,10 @@ constructor() {
       var warnings = [];
       if (result.r2_sky  < 0.99) warnings.push("R\u00b2_sky="  + result.r2_sky.toFixed(3)  + " is low \u2014 check background ROI for stars.");
       if (result.r2_star < 0.99) warnings.push("R\u00b2_star=" + result.r2_star.toFixed(3) + " is low \u2014 check star position and aperture.");
-      if (isNaN(result.sqm) && nExcluded === result.n_frames)
-         warnings.push("All frames saturated \u2014 shorten exposure or defocus.");
+      if (isNaN(result.sqm) && nUsed < 2)
+         warnings.push("Only " + nUsed + " frame(s) without saturated pixels \u2014 shorten exposure or defocus more.");
+      if (result.nonlinear_frames && result.nonlinear_frames.length > 0)
+         warnings.push("Non-linear rate (not excluded): " + result.nonlinear_frames.join(", "));
       this.resultWarningLabel.text = warnings.length > 0 ? "WARNING: " + warnings.join("  /  ") : "";
 
       // Refresh frame list with analysis status (Flux, Sat%, Status columns)

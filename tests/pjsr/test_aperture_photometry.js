@@ -101,4 +101,83 @@ test("aperturePhotometry: starRaDec overrides starX/starY with the WCS-projected
         + relDiff.toExponential(3));
 });
 
+// ============================================================
+// aperturePhotometry: saturated pixels are summed (not excluded/scaled), issue #13.
+// Kochab's 10s frame saturates at the star core. adu_star must equal the sum of
+// ALL aperture pixels (including saturated ones) minus skyBg * pixel count —
+// verified here by independently re-summing the aperture pixels, so this test
+// does not just re-check the production code against itself.
+// ============================================================
+test("aperturePhotometry: saturated pixels included in flux sum (issue #13)", function() {
+    var meta = readFrameMetadata(FRAME_10S);
+    assertTrue(meta !== null, "readFrameMetadata returned null");
+
+    var wins = ImageWindow.open(FRAME_10S);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
+    var win = wins[0];
+    var center;
+    try {
+        assertEqual(win.hasAstrometricSolution, true, "hasAstrometricSolution should be true");
+        var pt = win.celestialToImage(KOCHAB_RA, KOCHAB_DEC);
+        assertTrue(pt !== null, "celestialToImage returned null");
+        center = { x: Math.round(pt.x), y: Math.round(pt.y) };
+    } finally {
+        win.forceClose();
+    }
+
+    var ap = aperturePhotometry(FRAME_10S, center.x, center.y, APERTURE, meta.bitsPerSample, "G", null);
+    assertTrue(ap !== null, "aperturePhotometry returned null");
+    log("  saturated_pixels=" + ap.saturated_pixels
+        + "  saturated_fraction=" + (ap.saturated_fraction * 100).toFixed(2) + "%"
+        + "  skyBg=" + ap.skyBg.toFixed(2)
+        + "  adu_star=" + ap.adu_star.toFixed(1));
+    assertTrue(ap.saturated_pixels > 0,
+        "Kochab 10s frame should have saturated pixels in the aperture, got " + ap.saturated_pixels);
+
+    // Independently re-sum every pixel inside the same aperture circle (including
+    // saturated ones) and subtract skyBg * pixel count, using the exact same
+    // center/geometry convention as aperturePhotometry() (pixel (ix,iy) center =
+    // (ix+0.5, iy+0.5)), but computed here from scratch rather than by calling
+    // production helper functions.
+    var wins2 = ImageWindow.open(FRAME_10S);
+    assertTrue(wins2 && wins2.length > 0, "ImageWindow.open failed (2nd open)");
+    var win2   = wins2[0];
+    var image2 = win2.mainView.image;
+    var maxADU = (meta.bitsPerSample === 32) ? 4294967295 : 65535;
+    var ch     = 1; // "G" channel of a color image, matching aperturePhotometry's convention
+
+    var cx = ap.starX;
+    var cy = ap.starY;
+    var independentSum   = 0;
+    var independentCount = 0;
+    try {
+        var yLo = Math.floor(cy - APERTURE) - 1;
+        var yHi = Math.ceil(cy + APERTURE) + 1;
+        var xLo = Math.floor(cx - APERTURE) - 1;
+        var xHi = Math.ceil(cx + APERTURE) + 1;
+        for (var y = yLo; y <= yHi; y++) {
+            if (y < 0 || y >= image2.height) continue;
+            var py = y + 0.5;
+            for (var x = xLo; x <= xHi; x++) {
+                if (x < 0 || x >= image2.width) continue;
+                var px = x + 0.5;
+                var dx = px - cx;
+                var dy = py - cy;
+                if (dx * dx + dy * dy <= APERTURE * APERTURE) {
+                    independentCount++;
+                    independentSum += image2.sample(x, y, ch) * maxADU;
+                }
+            }
+        }
+    } finally {
+        win2.forceClose();
+    }
+
+    var independentNetFlux = independentSum - ap.skyBg * independentCount;
+    log("  independent: count=" + independentCount + "  sum=" + independentSum.toFixed(1)
+        + "  netFlux=" + independentNetFlux.toFixed(1));
+    assertEqual(ap.adu_star, independentNetFlux, "adu_star should equal independently-summed "
+        + "(all aperture pixels) - skyBg * count", 0.5);
+});
+
 runAllTests(RESULT_PATH);

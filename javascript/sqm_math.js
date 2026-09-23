@@ -121,6 +121,19 @@ function linearFit(xValues, yValues) {
 // ============================================================
 
 /**
+ * Maximum allowed saturated_fraction for a frame to be used in the L_star fit.
+ * A frame is excluded when saturated_fraction > MAX_SAT_FRACTION.
+ * Set to 0: since aperturePhotometry() no longer scales the flux to make up for
+ * saturated pixels (area-based fill-in always underestimates the true flux —
+ * the saturated pixels are the star's brightest, so no area scaling can recover
+ * them), any frame with even one saturated pixel in the aperture is excluded
+ * from the fit. This is the single source of truth for the threshold; both
+ * computeLStar() below and SkyQualityAnalyzer.js's runAnalysis() reference it.
+ * See GitHub issue #13.
+ */
+var MAX_SAT_FRACTION = 0;
+
+/**
  * Compute L_sky (background flux per pixel per second) from multi-exposure frames.
  * Each frame must have {exptime, adu_sky} where adu_sky is the
  * sigma-clipped median ADU of a star-free background region.
@@ -144,11 +157,11 @@ function computeLSky(frames) {
  * aperture-photometry net count for the reference star.
  * Frames with saturated_fraction > satThreshold are excluded from the fit.
  * @param {{exptime: number, adu_star: number, saturated_fraction?: number}[]} frames
- * @param {number} [satThreshold=0.3] - Frames with saturation above this fraction are excluded
+ * @param {number} [satThreshold=MAX_SAT_FRACTION] - Frames with saturation above this fraction are excluded
  * @returns {{L_star: number, r2: number, excluded_frames: number}}
  */
 function computeLStar(frames, satThreshold) {
-    if (satThreshold === undefined) satThreshold = 0.3;
+    if (satThreshold === undefined) satThreshold = MAX_SAT_FRACTION;
     var tValues = [];
     var adValues = [];
     var excluded = 0;
@@ -237,6 +250,7 @@ function normalizedToADU(normalized, bitsPerSample) {
 
 if (typeof module !== "undefined") {
     module.exports = {
+        MAX_SAT_FRACTION:    MAX_SAT_FRACTION,
         sigmaClippingStats:  sigmaClippingStats,
         median:              median,
         standardDeviation:   standardDeviation,
