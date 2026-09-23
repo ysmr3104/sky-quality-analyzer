@@ -137,6 +137,52 @@ function readFrameMetadata(filepath) {
 }
 
 //============================================================================
+// WCS safe wrappers
+// win.imageToCelestial()/celestialToImage() can throw, or return components
+// that are NaN/non-finite; celestialToImage() can also project outside the
+// image bounds. These wrappers turn all of that into a null return instead of
+// letting an exception propagate, modeled on imageToCelestialSafe()/
+// celestialToImageSafe() in the bundled NBExtractPI.js (signing machine,
+// /Applications/PixInsight/src/scripts/NBExtractPI.js, ~line 590).
+//============================================================================
+
+// win: ImageWindow. x, y: pixel coordinates. Returns a Point (x=RA deg,
+// y=Dec deg) or null.
+function safeImageToCelestial(win, x, y) {
+   var q = null;
+   try {
+      q = win.imageToCelestial(x, y);
+   } catch (e) {
+      try {
+         q = win.imageToCelestial(new Point(x, y));
+      } catch (e2) {
+         q = null;
+      }
+   }
+   if (q && typeof q.x === "number" && isFinite(q.x) && isFinite(q.y)) return q;
+   return null;
+}
+
+// win: ImageWindow. ra, dec: degrees. Returns a Point (image pixel
+// coordinates) if finite and within the image bounds, or null.
+function safeCelestialToImage(win, ra, dec) {
+   var q = null;
+   try {
+      q = win.celestialToImage(ra, dec);
+   } catch (e) {
+      try {
+         q = win.celestialToImage(new Point(ra, dec));
+      } catch (e2) {
+         q = null;
+      }
+   }
+   if (!q || typeof q.x !== "number" || !isFinite(q.x) || !isFinite(q.y)) return null;
+   var image = win.mainView.image;
+   if (q.x < 0 || q.x >= image.width || q.y < 0 || q.y >= image.height) return null;
+   return q;
+}
+
+//============================================================================
 // Sesame search (ExternalProcess + curl) — with V magnitude
 //============================================================================
 
@@ -711,7 +757,7 @@ constructor(parent, title, filepath, mode, aperture, pixelScale) {
             mb.execute();
             return;
          }
-         var pos = self.win.imageToCelestial(self.selectedX, self.selectedY);
+         var pos = safeImageToCelestial(self.win, self.selectedX, self.selectedY);
          if (!pos) {
             var mb = new MessageBox(
                "The clicked position falls outside the astrometric solution.\n"
@@ -756,12 +802,11 @@ constructor(parent, title, filepath, mode, aperture, pixelScale) {
             return;
          }
          // Filter to stars that project within the image bounds.
+         // safeCelestialToImage() already returns null for out-of-bounds projections.
          var inFrame = [];
          for (var si = 0; si < stars.length; si++) {
-            var pt = self.win.celestialToImage(stars[si].ra, stars[si].dec);
+            var pt = safeCelestialToImage(self.win, stars[si].ra, stars[si].dec);
             if (!pt) continue;
-            if (pt.x < 0 || pt.x >= self.imgWidth)  continue;
-            if (pt.y < 0 || pt.y >= self.imgHeight) continue;
             stars[si].px = pt.x;
             stars[si].py = pt.y;
             inFrame.push(stars[si]);
@@ -782,30 +827,45 @@ constructor(parent, title, filepath, mode, aperture, pixelScale) {
             // Update pixel position to the actual projected position of the catalog star
             console.writeln("  Star RA=" + self.selectedStar.ra.toFixed(4)
                + " Dec=" + self.selectedStar.dec.toFixed(4));
-            var imgPt = self.win.celestialToImage(self.selectedStar.ra, self.selectedStar.dec);
+            // Keep the fractional projected position (no rounding): aperturePhotometry
+            // accepts a fractional center, and rounding here would throw away precision
+            // the native solution actually gives us.
+            var imgPt = safeCelestialToImage(self.win, self.selectedStar.ra, self.selectedStar.dec);
             if (imgPt) {
-               self.selectedX = Math.round(imgPt.x);
-               self.selectedY = Math.round(imgPt.y);
-               console.writeln("  Catalog star projected to pixel: (" + self.selectedX + "," + self.selectedY + ")");
+               self.selectedX = imgPt.x;
+               self.selectedY = imgPt.y;
+               console.writeln("  Catalog star projected to pixel: ("
+                  + self.selectedX.toFixed(2) + "," + self.selectedY.toFixed(2) + ")");
             } else {
                console.writeln("  [WARN] celestialToImage returned null (outside solution range?)");
             }
-            self.coordLabel.text = "Position: X=" + self.selectedX + "  Y=" + self.selectedY
+            self.coordLabel.text = "Position: X=" + self.selectedX.toFixed(2) + "  Y=" + self.selectedY.toFixed(2)
                + "   →  " + self.selectedStar.id + "  V=" + self.selectedStar.vmag.toFixed(3);
          }
       };
    }
 
    this.preview.onImageClick = function(imgX, imgY) {
-      self.selectedX = Math.round(imgX);
-      self.selectedY = Math.round(imgY);
+      // Background mode feeds measureBackground(), which loops over integer pixel
+      // indices, so keep it rounded. Star mode keeps the fractional click position
+      // (aperturePhotometry accepts a fractional center); only the label rounds it
+      // for display.
+      if (self.mode === "background") {
+         self.selectedX = Math.round(imgX);
+         self.selectedY = Math.round(imgY);
+      } else {
+         self.selectedX = imgX;
+         self.selectedY = imgY;
+      }
       self.selectedStar  = null;
       self.selectedRaDec = null;
       if (self.hasWcs && self.win) {
-         var celestial = self.win.imageToCelestial(imgX, imgY);
+         var celestial = safeImageToCelestial(self.win, self.selectedX, self.selectedY);
          if (celestial) self.selectedRaDec = { ra: celestial.x, dec: celestial.y };
       }
-      self.coordLabel.text = "Position: X=" + self.selectedX + "  Y=" + self.selectedY;
+      self.coordLabel.text = (self.mode === "background")
+         ? ("Position: X=" + self.selectedX + "  Y=" + self.selectedY)
+         : ("Position: X=" + self.selectedX.toFixed(2) + "  Y=" + self.selectedY.toFixed(2));
       if (self.catalogBtn) self.catalogBtn.enabled = true;
    };
 
@@ -846,23 +906,30 @@ constructor(parent, title, filepath, mode, aperture, pixelScale) {
    // the caller must call releaseImage() after execute() returns.
    var wins = ImageWindow.open(filepath);
    if (wins && wins.length > 0) {
-      var win   = wins[0];
-      var image = win.mainView.image;
-      this.win       = win;
-      this.imgWidth  = image.width;   // used for out-of-frame check in catalog lookup
-      this.imgHeight = image.height;
-      this.hasWcs    = (win.hasAstrometricSolution === true);
-      console.writeln("Generating preview for: " + File.extractName(filepath));
-      console.flush();
-      var bmpResult = createStretchedBitmap(image, MAX_BMP_EDGE);
-      this.preview.setBitmap(bmpResult);
+      var win = wins[0];
+      this.win = win; // retained from here on; released via releaseImage()
+      try {
+         var image = win.mainView.image;
+         this.imgWidth  = image.width;   // used for out-of-frame check in catalog lookup
+         this.imgHeight = image.height;
+         this.hasWcs    = (win.hasAstrometricSolution === true);
+         console.writeln("Generating preview for: " + File.extractName(filepath));
+         console.flush();
+         var bmpResult = createStretchedBitmap(image, MAX_BMP_EDGE);
+         this.preview.setBitmap(bmpResult);
 
-      if (mode === "star") {
-         if (this.hasWcs) {
-            console.writeln("  Astrometric solution available — catalog lookup enabled.");
-         } else {
-            console.writeln("  No astrometric solution — catalog lookup unavailable.");
+         if (mode === "star") {
+            if (this.hasWcs) {
+               console.writeln("  Astrometric solution available — catalog lookup enabled.");
+            } else {
+               console.writeln("  No astrometric solution — catalog lookup unavailable.");
+            }
          }
+      } catch (e) {
+         // Don't leak the window if bitmap generation or anything else here throws.
+         win.forceClose();
+         this.win = null;
+         throw e;
       }
    } else {
       var mb = new MessageBox("Cannot open file:\n" + filepath, TITLE, StdIcon.Error, StdButton.Ok);
@@ -936,96 +1003,102 @@ function measureBackground(filepath, bgX, bgY, bitsPerSample, sqmChannel) {
 function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqmChannel, starRaDec) {
    var wins = ImageWindow.open(filepath);
    if (!wins || wins.length === 0) return null;
-   var win   = wins[0];
-   var image = win.mainView.image;
+   var win = wins[0];
+   try {
+      var image = win.mainView.image;
 
-   // Per-frame star center: prefer the WCS-projected position for this specific
-   // frame's solution over the fixed pixel coordinates passed in.
-   var cx = starX;
-   var cy = starY;
-   if (starRaDec && win.hasAstrometricSolution === true) {
-      var projected = win.celestialToImage(starRaDec.ra, starRaDec.dec);
-      if (projected) {
-         cx = projected.x;
-         cy = projected.y;
-      }
-   }
-
-   var isColor  = (image.numberOfChannels >= 3);
-   var ch       = (isColor && sqmChannel === "G") ? 1 : 0;
-   var maxADU   = (bitsPerSample === 32) ? 4294967295 : 65535;
-   var satLimit = SAT_THRESHOLD * maxADU;
-
-   var r_ap  = aperture;
-   var r_in  = aperture + 5;
-   var r_out = aperture + 25;  // widened for more stable background estimate
-
-   // Sky annulus — sigma-clipped, SExtractor-style mode estimate
-   var skyPixels = [];
-   var skyYLo = Math.floor(cy - r_out) - 1;
-   var skyYHi = Math.ceil(cy + r_out) + 1;
-   var skyXLo = Math.floor(cx - r_out) - 1;
-   var skyXHi = Math.ceil(cx + r_out) + 1;
-   for (var y = skyYLo; y <= skyYHi; y++) {
-      if (y < 0 || y >= image.height) continue;
-      var skyPy = y + 0.5;
-      for (var x = skyXLo; x <= skyXHi; x++) {
-         if (x < 0 || x >= image.width) continue;
-         var skyPx = x + 0.5;
-         var dx = skyPx - cx;
-         var dy = skyPy - cy;
-         var dist = Math.sqrt(dx * dx + dy * dy);
-         if (dist >= r_in && dist <= r_out) {
-            skyPixels.push(image.sample(x, y, ch) * maxADU);
+      // Per-frame star center: prefer the WCS-projected position for this specific
+      // frame's solution over the fixed pixel coordinates passed in.
+      var cx = starX;
+      var cy = starY;
+      if (starRaDec && win.hasAstrometricSolution === true) {
+         var projected = safeCelestialToImage(win, starRaDec.ra, starRaDec.dec);
+         if (projected) {
+            cx = projected.x;
+            cy = projected.y;
+         } else {
+            console.warningln("  [WARN] Could not project star position onto "
+               + File.extractName(filepath) + " — using fixed star coords");
          }
       }
-   }
 
-   var skyStats = sigmaClippingStats(skyPixels, 3.0, 10);
-   // SExtractor mode: more robust when faint stars contaminate the annulus
-   var skyBg = 2.5 * skyStats.median - 1.5 * skyStats.mean;
-   if (skyBg <= 0) skyBg = skyStats.median;  // fallback for pathological cases
+      var isColor  = (image.numberOfChannels >= 3);
+      var ch       = (isColor && sqmChannel === "G") ? 1 : 0;
+      var maxADU   = (bitsPerSample === 32) ? 4294967295 : 65535;
+      var satLimit = SAT_THRESHOLD * maxADU;
 
-   // Aperture sum with saturation masking
-   var aperSum  = 0;
-   var apCount  = 0;
-   var satCount = 0;
-   var apYLo = Math.floor(cy - r_ap) - 1;
-   var apYHi = Math.ceil(cy + r_ap) + 1;
-   var apXLo = Math.floor(cx - r_ap) - 1;
-   var apXHi = Math.ceil(cx + r_ap) + 1;
-   for (var y = apYLo; y <= apYHi; y++) {
-      if (y < 0 || y >= image.height) continue;
-      var apPy = y + 0.5;
-      for (var x = apXLo; x <= apXHi; x++) {
-         if (x < 0 || x >= image.width) continue;
-         var apPx = x + 0.5;
-         var dx = apPx - cx;
-         var dy = apPy - cy;
-         if (dx * dx + dy * dy <= r_ap * r_ap) {
-            apCount++;
-            var pixADU = image.sample(x, y, ch) * maxADU;
-            if (pixADU >= satLimit) {
-               satCount++;
-            } else {
-               aperSum += pixADU;
+      var r_ap  = aperture;
+      var r_in  = aperture + 5;
+      var r_out = aperture + 25;  // widened for more stable background estimate
+
+      // Sky annulus — sigma-clipped, SExtractor-style mode estimate
+      var skyPixels = [];
+      var skyYLo = Math.floor(cy - r_out) - 1;
+      var skyYHi = Math.ceil(cy + r_out) + 1;
+      var skyXLo = Math.floor(cx - r_out) - 1;
+      var skyXHi = Math.ceil(cx + r_out) + 1;
+      for (var y = skyYLo; y <= skyYHi; y++) {
+         if (y < 0 || y >= image.height) continue;
+         var skyPy = y + 0.5;
+         for (var x = skyXLo; x <= skyXHi; x++) {
+            if (x < 0 || x >= image.width) continue;
+            var skyPx = x + 0.5;
+            var dx = skyPx - cx;
+            var dy = skyPy - cy;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist >= r_in && dist <= r_out) {
+               skyPixels.push(image.sample(x, y, ch) * maxADU);
             }
          }
       }
-   }
 
-   win.close();
+      var skyStats = sigmaClippingStats(skyPixels, 3.0, 10);
+      // SExtractor mode: more robust when faint stars contaminate the annulus
+      var skyBg = 2.5 * skyStats.median - 1.5 * skyStats.mean;
+      if (skyBg <= 0) skyBg = skyStats.median;  // fallback for pathological cases
 
-   var usedCount = apCount - satCount;
-   var netFlux;
-   if (usedCount <= 0) {
-      netFlux = NaN;
-   } else {
-      // Net flux from non-saturated pixels, scaled to full aperture area
-      netFlux = (aperSum - skyBg * usedCount) * (apCount / usedCount);
+      // Aperture sum with saturation masking
+      var aperSum  = 0;
+      var apCount  = 0;
+      var satCount = 0;
+      var apYLo = Math.floor(cy - r_ap) - 1;
+      var apYHi = Math.ceil(cy + r_ap) + 1;
+      var apXLo = Math.floor(cx - r_ap) - 1;
+      var apXHi = Math.ceil(cx + r_ap) + 1;
+      for (var y = apYLo; y <= apYHi; y++) {
+         if (y < 0 || y >= image.height) continue;
+         var apPy = y + 0.5;
+         for (var x = apXLo; x <= apXHi; x++) {
+            if (x < 0 || x >= image.width) continue;
+            var apPx = x + 0.5;
+            var dx = apPx - cx;
+            var dy = apPy - cy;
+            if (dx * dx + dy * dy <= r_ap * r_ap) {
+               apCount++;
+               var pixADU = image.sample(x, y, ch) * maxADU;
+               if (pixADU >= satLimit) {
+                  satCount++;
+               } else {
+                  aperSum += pixADU;
+               }
+            }
+         }
+      }
+
+      var usedCount = apCount - satCount;
+      var netFlux;
+      if (usedCount <= 0) {
+         netFlux = NaN;
+      } else {
+         // Net flux from non-saturated pixels, scaled to full aperture area
+         netFlux = (aperSum - skyBg * usedCount) * (apCount / usedCount);
+      }
+      var saturated_fraction = (apCount > 0) ? (satCount / apCount) : 0;
+      return { adu_star: netFlux, saturated_fraction: saturated_fraction, starX: cx, starY: cy };
+   } finally {
+      // Always release the window, even if projection or sampling throws.
+      win.close();
    }
-   var saturated_fraction = (apCount > 0) ? (satCount / apCount) : 0;
-   return { adu_star: netFlux, saturated_fraction: saturated_fraction, starX: cx, starY: cy };
 }
 
 //============================================================================
@@ -1126,7 +1199,7 @@ function exportCSV(result, frames, outputPath) {
    lines.push("VMag,\"" + result.vmag.toFixed(3) + "\"");
    lines.push("Channel,\"" + result.sqmChannel + "\"");
    lines.push("BackgroundROI,\"(" + result.bgX + "," + result.bgY + ") 64×64 px\"");
-   lines.push("StarPosition,\"(" + result.starX + "," + result.starY + ")\"");
+   lines.push("StarPosition,\"(" + result.starX.toFixed(2) + "," + result.starY.toFixed(2) + ")\"");
    lines.push("Aperture,\"" + result.aperture + " px\"");
    lines.push("NFrames,\"" + result.n_frames + "\"");
    lines.push("");
@@ -1372,9 +1445,13 @@ constructor() {
       for (var fi = 0; fi < self.frames.length; fi++) {
          if (self.frames[fi].exptime > bgFrame.exptime) bgFrame = self.frames[fi];
       }
-      var dlg = new PointSelectionDialog(self, "Select Background Region",
-         bgFrame.filepath, "background", 0);
+      // Construction itself can throw (e.g. while loading the preview bitmap), so
+      // it goes inside the try too — otherwise a failed construction would leak
+      // the ImageWindow it had already opened.
+      var dlg = null;
       try {
+         dlg = new PointSelectionDialog(self, "Select Background Region",
+            bgFrame.filepath, "background", 0);
          if (dlg.execute() === 1) {
             self.bgX = dlg.selectedX;
             self.bgY = dlg.selectedY;
@@ -1382,7 +1459,7 @@ constructor() {
             self.updateUI();
          }
       } finally {
-         dlg.releaseImage();
+         if (dlg) dlg.releaseImage();
       }
    };
 
@@ -1438,14 +1515,15 @@ constructor() {
             if (self.frames[fi].exptime > previewFrame.exptime) previewFrame = self.frames[fi];
          }
       }
-      var dlg = new PointSelectionDialog(self, "Select Reference Star",
-         previewFrame.filepath, "star", ap, currentPs);
+      var dlg = null;
       try {
+         dlg = new PointSelectionDialog(self, "Select Reference Star",
+            previewFrame.filepath, "star", ap, currentPs);
          if (dlg.execute() === 1) {
             self.starX     = dlg.selectedX;
             self.starY     = dlg.selectedY;
             self.starRaDec = dlg.selectedRaDec || null;
-            self.starPosDisplay.text = "X=" + self.starX + "  Y=" + self.starY;
+            self.starPosDisplay.text = "X=" + self.starX.toFixed(2) + "  Y=" + self.starY.toFixed(2);
             // Auto-fill name and V mag if a catalog star was identified
             if (dlg.selectedStar) {
                self.starNameEdit.text = dlg.selectedStar.id;
@@ -1455,7 +1533,7 @@ constructor() {
             self.updateUI();
          }
       } finally {
-         dlg.releaseImage();
+         if (dlg) dlg.releaseImage();
       }
    };
 
@@ -1833,7 +1911,7 @@ constructor() {
    console.writeln("Telescope: " + tele.name);
    console.writeln("Frames:    " + this.frames.length);
    console.writeln("Background ROI: (" + this.bgX + ", " + this.bgY + ") 64×64 px");
-   console.writeln("Star Position:  (" + this.starX + ", " + this.starY + ")  aperture=" + aperture + " px");
+   console.writeln("Star Position:  (" + this.starX.toFixed(2) + ", " + this.starY.toFixed(2) + ")  aperture=" + aperture + " px");
    console.writeln("V magnitude:    " + this.vmag.toFixed(3));
    console.writeln("");
 

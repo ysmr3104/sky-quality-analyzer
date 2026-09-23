@@ -59,4 +59,46 @@ test("aperturePhotometry: flux changes <= 2% for a 0.3 px center shift", functio
         + diffPct.toFixed(3) + "%");
 });
 
+test("aperturePhotometry: starRaDec overrides starX/starY with the WCS-projected position", function() {
+    var meta = readFrameMetadata(FRAME_10S);
+    assertTrue(meta !== null, "readFrameMetadata returned null");
+
+    var wins = ImageWindow.open(FRAME_10S);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
+    var win = wins[0];
+    var expectedPt;
+    try {
+        assertEqual(win.hasAstrometricSolution, true, "hasAstrometricSolution should be true");
+        expectedPt = win.celestialToImage(KOCHAB_RA, KOCHAB_DEC);
+        assertTrue(expectedPt !== null, "celestialToImage returned null");
+    } finally {
+        win.forceClose();
+    }
+    log("  expected projected center = (" + expectedPt.x.toFixed(4) + ", " + expectedPt.y.toFixed(4) + ")");
+
+    var starRaDec = { ra: KOCHAB_RA, dec: KOCHAB_DEC };
+    // Deliberately pass a wrong fallback center (0, 0). If starRaDec is actually
+    // honored, this fallback is never used and the result still lands on the star.
+    var apViaRaDec = aperturePhotometry(FRAME_10S, 0, 0, APERTURE, meta.bitsPerSample, "G", starRaDec);
+    assertTrue(apViaRaDec !== null, "aperturePhotometry (via starRaDec) returned null");
+
+    // (a) returned starX/starY should match celestialToImage() within 0.01 px.
+    log("  (a) apViaRaDec.starX/Y = (" + apViaRaDec.starX.toFixed(4) + ", " + apViaRaDec.starY.toFixed(4) + ")");
+    assertEqual(apViaRaDec.starX, expectedPt.x, "(a) returned starX should match celestialToImage", 0.01);
+    assertEqual(apViaRaDec.starY, expectedPt.y, "(a) returned starY should match celestialToImage", 0.01);
+
+    // (b) adu_star should match a direct call using that same center (no starRaDec),
+    // to within a relative 1e-9 — i.e. the starRaDec path isn't computing anything
+    // differently from just being handed the right coordinates.
+    var apDirect = aperturePhotometry(FRAME_10S, expectedPt.x, expectedPt.y, APERTURE, meta.bitsPerSample, "G", null);
+    assertTrue(apDirect !== null, "aperturePhotometry (direct center) returned null");
+
+    var relDiff = Math.abs(apViaRaDec.adu_star - apDirect.adu_star) / Math.abs(apDirect.adu_star);
+    log("  (b) adu_star via starRaDec=" + apViaRaDec.adu_star.toFixed(6)
+        + "  via direct center=" + apDirect.adu_star.toFixed(6)
+        + "  relDiff=" + relDiff.toExponential(3));
+    assertTrue(relDiff <= 1e-9, "(b) adu_star should match the direct-center call to within a relative 1e-9, got "
+        + relDiff.toExponential(3));
+});
+
 runAllTests(RESULT_PATH);

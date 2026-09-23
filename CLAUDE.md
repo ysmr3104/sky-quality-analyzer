@@ -79,7 +79,7 @@ log -f="/Users/ysmr/Downloads/pixinsight_sqa_20260327_120000.log" -a
 - **FITSKeyword 値アクセス**: PJSR は `kw.value` を使用。文字列値はクォート除去が必要: `kw.value.trim().replace(/^'|'$/g, "").trim()`。
 - **UI 初期化順序**: ウィジェットのプロパティ参照（`enabled` など）は、そのウィジェットが定義された後に行うこと。コンストラクタ内で定義前のウィジェットを参照すると undefined エラーになる。
 - **Dialog の予約済みプロパティ**: `Dialog.result` は終了コード用の整数プロパティ。独自の結果格納に使用してはならない（`null` 代入でエラー）。別名（例: `sqmResult`）を使うこと。
-- **座標変換はネイティブ API を使う**: ピクセル座標 ⇔ RA/Dec の変換は自前実装せず `ImageWindow.celestialToImage()` / `ImageWindow.imageToCelestial()` を使うこと（Issue #11 で自前の TAN 投影近似から置き換え済み）。`ImageWindow.hasAstrometricSolution` で解の有無を確認し、両 API とも範囲外で `null` を返し得るので呼び出し側で null チェックする。
+- **座標変換はネイティブ API を使う**: ピクセル座標 ⇔ RA/Dec の変換は自前実装せず `ImageWindow.celestialToImage()` / `ImageWindow.imageToCelestial()` を使うこと（Issue #11 で自前の TAN 投影近似から置き換え済み）。`ImageWindow.hasAstrometricSolution` で解の有無を確認する。両 API とも例外・NaN・画像外を返し得ることを想定し、直接呼ばずに `safeCelestialToImage()` / `safeImageToCelestial()`（`SkyQualityAnalyzer.js`）を経由すること。同梱の `NBExtractPI.js`（署名機 `/Applications/PixInsight/src/scripts/NBExtractPI.js`）の `imageToCelestialSafe`/`celestialToImageSafe` にならった作り。
 
 ## 外部依存
 
