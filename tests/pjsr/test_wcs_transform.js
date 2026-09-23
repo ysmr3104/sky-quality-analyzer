@@ -100,61 +100,48 @@ function assertStarAtProjectedPosition(filepath, label) {
 }
 
 // ============================================================
-// Off-center star: celestialToImage() vs. a background-subtracted centroid
+// Off-center stars: celestialToImage() vs. a significant-pixels-only centroid
 // ============================================================
 // Kochab sits close to the frame center, where the retired linear TAN
 // approximation was already fairly accurate (its error grows with distance
-// from the tangent point). It can't tell a correct implementation from that
-// old, buggy one. HD 136919 (V=6.681, SIMBAD J2000, isolated — no other
-// V-magnitude star within 3' per SIMBAD) sits ~1700 px from the frame center
-// (4144x2822, center (2072,1411)) — about 68% of the way to a corner. Measured
-// directly against the retired formula (its CRPIX/CRVAL/CD read from the XISF
-// header, before removal) it was projected 84 px away from where
-// celestialToImage() puts it; Kochab, near the tangent point, was off by only
-// ~1 px by the same comparison.
-var CORNER_STAR = {
-    name: "HD 136919",
-    ra:  229.34424277666997,
-    dec: 74.04514025971
-};
-
-// A background-subtracted centroid can't itself be used as an exact ground
-// truth here: the same ~5-8 px offset in y (celestialToImage vs. the actual
-// pixel data) shows up not just for this star but also for Kochab near the
-// frame center (projected (2086.6, 1414.9) vs. centroid (2087.1, 1407.3) in an
-// initial check) — i.e. it looks like a roughly uniform shift across the
-// whole frame rather than a distortion that grows toward the edges. The
-// fixtures are real captures, not synthetic, but all 6 frames were re-saved
-// together the day after capture (traces of a since-lost cropping script);
-// the astrometric solution and the pixel data may not agree to better than a
-// few px as a result. Root cause tracked in issue #22. Until that's resolved,
-// 8 px is loose enough to absorb this whole-frame offset while still reliably
-// catching the retired implementation's error at this star (84 px, above) —
-// tighten it once #22 lands.
-function backgroundSubtractedCentroid(image, ch, cx, cy, r, bgMedian) {
-    var wSum = 0, wxSum = 0, wySum = 0;
-    var yLo = Math.floor(cy - r) - 1, yHi = Math.ceil(cy + r) + 1;
-    var xLo = Math.floor(cx - r) - 1, xHi = Math.ceil(cx + r) + 1;
-    for (var y = yLo; y <= yHi; y++) {
-        if (y < 0 || y >= image.height) continue;
-        var py = y + 0.5;
-        for (var x = xLo; x <= xHi; x++) {
-            if (x < 0 || x >= image.width) continue;
-            var px = x + 0.5;
-            var dx = px - cx, dy = py - cy;
-            if (dx * dx + dy * dy > r * r) continue;
-            var w = image.sample(x, y, ch) - bgMedian;
-            if (w <= 0) continue;
-            wSum  += w;
-            wxSum += w * px;
-            wySum += w * py;
-        }
+// from the tangent point), and where a flipped y axis barely moves anything
+// (a flip maps y -> H-y, which is close to y itself when y is close to H/2).
+// Neither the retired implementation nor a flipped y axis can be told apart
+// from a correct one using only a star on the vertical center line. So this
+// uses three isolated, unsaturated stars (SIMBAD J2000), one off to the side
+// and one near each vertical edge:
+var TEST_STARS = [
+    {
+        // V=6.681. No other V-magnitude star within 3' per SIMBAD. Projects to
+        // (370,1414) — ~1700px to the left of the frame center (4144x2822,
+        // center (2072,1411)), about 68% of the way to a corner. Measured
+        // directly against the retired formula (its CRPIX/CRVAL/CD read from
+        // the XISF header, before removal) it was projected 84px away from
+        // where celestialToImage() puts it.
+        name: "HD 136919",
+        ra:  229.34424277666997,
+        dec: 74.04514025971
+    },
+    {
+        // V=7.63. Projects to (2108,356) — near the TOP edge (~356px from
+        // it), with x close to the frame's x-center (2072), which isolates
+        // the y axis from any x-direction effect.
+        name: "HD 131710",
+        ra:  222.58576789384,
+        dec: 73.02778114665
+    },
+    {
+        // V=7.99. Projects to (791,2715) — near the BOTTOM edge (~107px
+        // from it).
+        name: "TW UMi",
+        ra:  228.21212036959997,
+        dec: 75.47114969322
     }
-    if (wSum <= 0) return null;
-    return { x: wxSum / wSum, y: wySum / wSum };
-}
+];
 
-function annulusMedian(image, ch, cx, cy, rIn, rOut) {
+// Background stats (mean, std) from a sigma-clipped annulus — std, not MAD,
+// since the centroid below needs a real per-pixel noise estimate.
+function backgroundStats(image, ch, cx, cy, rIn, rOut) {
     var vals = [];
     var yLo = Math.floor(cy - rOut) - 1, yHi = Math.ceil(cy + rOut) + 1;
     var xLo = Math.floor(cx - rOut) - 1, xHi = Math.ceil(cx + rOut) + 1;
@@ -169,55 +156,156 @@ function annulusMedian(image, ch, cx, cy, rIn, rOut) {
             if (dist >= rIn && dist <= rOut) vals.push(image.sample(x, y, ch));
         }
     }
-    return median(vals);
+    if (vals.length === 0) return null;
+    return sigmaClippingStats(vals, 3.0, 10); // { median, mean, std, count }
 }
 
-var CENTROID_TOLERANCE_PX = 8; // see comment on CORNER_STAR above
+// Centroid over pixels whose background-subtracted value exceeds 3*bgStd —
+// i.e. only pixels that are actually part of a detected source, not every
+// positive noise fluctuation in the window (a plain "subtract the background
+// and keep positive values" centroid is biased toward the window's own
+// center by symmetric noise, even with no star in the window at all).
+// Also returns the raw peak value, so the caller can require a minimum
+// detection significance separately.
+function significantPixelCentroid(image, ch, cx, cy, r, bgMean, bgStd) {
+    var wSum = 0, wxSum = 0, wySum = 0;
+    var peak = -1;
+    var yLo = Math.floor(cy - r) - 1, yHi = Math.ceil(cy + r) + 1;
+    var xLo = Math.floor(cx - r) - 1, xHi = Math.ceil(cx + r) + 1;
+    for (var y = yLo; y <= yHi; y++) {
+        if (y < 0 || y >= image.height) continue;
+        var py = y + 0.5;
+        for (var x = xLo; x <= xHi; x++) {
+            if (x < 0 || x >= image.width) continue;
+            var px = x + 0.5;
+            var dx = px - cx, dy = py - cy;
+            if (dx * dx + dy * dy > r * r) continue;
+            var v = image.sample(x, y, ch);
+            if (v > peak) peak = v;
+            if (bgStd <= 0) continue;
+            var w = v - bgMean;
+            if (w <= 3 * bgStd) continue; // keep only >3sigma pixels
+            wSum  += w;
+            wxSum += w * px;
+            wySum += w * py;
+        }
+    }
+    if (peak < 0 || wSum <= 0) return null;
+    return { x: wxSum / wSum, y: wySum / wSum, peak: peak };
+}
 
-function assertProjectionMatchesCentroid(filepath, label) {
+// Runs the significant-pixel centroid check at an explicit pixel center
+// (rather than a star's celestialToImage() position), so the mutation test
+// below can probe a deliberately wrong center without duplicating this logic.
+// Returns { sigma, diffX, diffY } or null (no pixels 3sigma above background
+// within the aperture at all).
+function centroidCheckAt(image, ch, cx, cy, r) {
+    var bg = backgroundStats(image, ch, cx, cy, r + 5, r + 25);
+    if (!bg || bg.count === 0) return null;
+    var result = significantPixelCentroid(image, ch, cx, cy, r, bg.mean, bg.std);
+    if (!result) return null;
+    var sigma = (bg.std > 0) ? (result.peak - bg.mean) / bg.std : NaN;
+    return { sigma: sigma, diffX: result.x - cx, diffY: result.y - cy };
+}
+
+// 3px: the residual between celestialToImage()'s position and each star's
+// actual pixel position (found via the significant-pixel centroid above) was
+// <= 3px for all three stars in both exposures.
+var CENTROID_TOLERANCE_PX = 3;
+var MIN_DETECTION_SIGMA   = 5;
+
+function assertProjectionMatchesCentroid(filepath, label, star) {
     var wins = ImageWindow.open(filepath);
     assertTrue(wins && wins.length > 0, "ImageWindow.open failed: " + filepath);
     var win = wins[0];
     try {
         assertEqual(win.hasAstrometricSolution, true, label + ": hasAstrometricSolution should be true");
 
-        var pt = win.celestialToImage(CORNER_STAR.ra, CORNER_STAR.dec);
+        var pt = win.celestialToImage(star.ra, star.dec);
         assertTrue(pt !== null, label + ": celestialToImage returned null");
-        log("  " + label + ": " + CORNER_STAR.name + " celestialToImage = ("
+        log("  " + label + ": " + star.name + " celestialToImage = ("
             + pt.x.toFixed(2) + ", " + pt.y.toFixed(2) + ")");
 
         var image = win.mainView.image;
         var ch = 1; // G channel
-        var r  = STAR_APERTURE;
-        var bgMedian = annulusMedian(image, ch, pt.x, pt.y, r + 5, r + 25);
-        var centroid = backgroundSubtractedCentroid(image, ch, pt.x, pt.y, r, bgMedian);
-        assertTrue(centroid !== null, label + ": centroid had no signal above background");
+        var check = centroidCheckAt(image, ch, pt.x, pt.y, STAR_APERTURE);
+        assertTrue(check !== null, label + ": " + star.name
+            + " — no pixels 3sigma above background within the aperture (no detectable star at the projected position)");
 
-        var diffX = centroid.x - pt.x;
-        var diffY = centroid.y - pt.y;
-        log("  " + label + ": centroid=(" + centroid.x.toFixed(2) + "," + centroid.y.toFixed(2) + ")"
-            + " bgMedian=" + bgMedian.toFixed(5)
-            + " diff=(" + diffX.toFixed(2) + "," + diffY.toFixed(2) + ")");
-        assertTrue(Math.abs(diffX) <= CENTROID_TOLERANCE_PX, label + ": centroid x should be within "
-            + CENTROID_TOLERANCE_PX + "px of celestialToImage, diff=" + diffX.toFixed(2));
-        assertTrue(Math.abs(diffY) <= CENTROID_TOLERANCE_PX, label + ": centroid y should be within "
-            + CENTROID_TOLERANCE_PX + "px of celestialToImage, diff=" + diffY.toFixed(2));
+        log("  " + label + ": " + star.name + " sigma=" + check.sigma.toFixed(2)
+            + " diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ")");
+        assertTrue(check.sigma >= MIN_DETECTION_SIGMA, label + ": " + star.name
+            + " peak should be >= " + MIN_DETECTION_SIGMA + "sigma above background, got " + check.sigma.toFixed(2) + "sigma");
+        assertTrue(Math.abs(check.diffX) <= CENTROID_TOLERANCE_PX, label + ": " + star.name
+            + " centroid x should be within " + CENTROID_TOLERANCE_PX + "px of celestialToImage, diff=" + check.diffX.toFixed(2));
+        assertTrue(Math.abs(check.diffY) <= CENTROID_TOLERANCE_PX, label + ": " + star.name
+            + " centroid y should be within " + CENTROID_TOLERANCE_PX + "px of celestialToImage, diff=" + check.diffY.toFixed(2));
     } finally {
         win.forceClose();
     }
 }
 
-test(CORNER_STAR.name + ": celestialToImage matches background-subtracted centroid — 1s frame", function() {
-    assertProjectionMatchesCentroid(FRAME_1S, "1s");
-});
+for (var _si = 0; _si < TEST_STARS.length; _si++) {
+    (function(star) {
+        test(star.name + ": celestialToImage matches significant-pixel centroid — 1s frame", function() {
+            assertProjectionMatchesCentroid(FRAME_1S, "1s", star);
+        });
+        test(star.name + ": celestialToImage matches significant-pixel centroid — 10s frame", function() {
+            assertProjectionMatchesCentroid(FRAME_10S, "10s", star);
+        });
+    })(TEST_STARS[_si]);
+}
 
-test(CORNER_STAR.name + ": celestialToImage matches background-subtracted centroid — 10s frame", function() {
-    assertProjectionMatchesCentroid(FRAME_10S, "10s");
+// Mutation test: a centroid check that only looks for *some* signal above
+// background, with no minimum significance, would still "pass" on pure noise
+// when centered 84px away from the real star (this repo's measured retired-
+// implementation error for HD 136919, see TEST_STARS above) — the noise
+// above the background threshold is roughly symmetric around any window
+// center, including a wrong one, so the centroid lands back on the window
+// center by construction. Confirm the actual check above doesn't do that:
+// shifting HD 136919's projected position by (84, 0) must make it fail,
+// either by finding no 3sigma signal, by failing the 5sigma detection
+// requirement, or by landing outside the tolerance.
+test("mutation: centroid check must fail when the center is wrong by (84, 0)", function() {
+    var wins = ImageWindow.open(FRAME_10S);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
+    var win = wins[0];
+    try {
+        var star = TEST_STARS[0]; // HD 136919
+        var pt = win.celestialToImage(star.ra, star.dec);
+        assertTrue(pt !== null, "celestialToImage returned null");
+        var wrongX = pt.x + 84;
+        var wrongY = pt.y;
+
+        var image = win.mainView.image;
+        var check = centroidCheckAt(image, 1, wrongX, wrongY, STAR_APERTURE);
+
+        var failed;
+        var reason;
+        if (!check) {
+            failed = true;
+            reason = "no pixels 3sigma above background";
+        } else if (check.sigma < MIN_DETECTION_SIGMA) {
+            failed = true;
+            reason = "sigma=" + check.sigma.toFixed(2) + " < " + MIN_DETECTION_SIGMA;
+        } else if (Math.abs(check.diffX) > CENTROID_TOLERANCE_PX || Math.abs(check.diffY) > CENTROID_TOLERANCE_PX) {
+            failed = true;
+            reason = "diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ") exceeds " + CENTROID_TOLERANCE_PX + "px";
+        } else {
+            failed = false;
+            reason = "sigma=" + check.sigma.toFixed(2) + " diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ")";
+        }
+        log("  wrong center=(" + wrongX.toFixed(2) + "," + wrongY.toFixed(2) + "): " + reason
+            + " -> " + (failed ? "correctly failed" : "WRONGLY PASSED"));
+        assertTrue(failed, "shifting the center by (84,0) should make the centroid check fail, but it passed: " + reason);
+    } finally {
+        win.forceClose();
+    }
 });
 
 // Auxiliary: Kochab sits near the tangent point, so this only confirms a star
-// is roughly where celestialToImage() says — see CORNER_STAR above for the
-// test that can actually tell the retired implementation from a correct one.
+// is roughly where celestialToImage() says — see TEST_STARS above for the
+// tests that can actually tell a wrong implementation from a correct one.
 test("celestialToImage(Kochab) lands on the star — 1s frame", function() {
     assertStarAtProjectedPosition(FRAME_1S, "1s");
 });
