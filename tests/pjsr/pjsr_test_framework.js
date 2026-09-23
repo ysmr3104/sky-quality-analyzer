@@ -2,9 +2,9 @@
 // PJSR（PixInsight JavaScript Runtime）用テストフレームワーク
 //
 // 使い方:
-//   var __SPLIT_SOLVER_LIBRARY_MODE = true;
-//   // #include "../../javascript/SplitImageSolver.js"
-//   // #include "pjsr_test_framework.js"
+//   var __SQA_LIBRARY_MODE = true;
+//   #include "../../javascript/SkyQualityAnalyzer.js"
+//   #include "pjsr_test_framework.js"
 //
 //   test("2+2は4", function() {
 //       assertEqual(2 + 2, 4, "加算");
@@ -13,8 +13,8 @@
 //   runAllTests(PROJECT_ROOT + "tests/pjsr/results/my_result.json");
 //
 // ログ:
-//   runAllTests() 実行後、outputPath と同じディレクトリに
-//   <テスト名>.log が生成される（console.writeln の全出力を含む）
+//   outputPath と同じディレクトリに <テスト名>.log が生成される。
+//   中身は log() で書いた行だけ（console.writeln は差し替えられないため）
 
 (function() {
 
@@ -24,27 +24,26 @@ var _failed = 0;
 var _errors = [];
 var _logLines = [];
 
-// console.writeln をオーバーライドして全出力をバッファに蓄積する。
-// SplitImageSolver.js 内の出力も含めて全てキャプチャできる。
-var _origWriteln    = console.writeln;
-var _origWarningln  = console.warningln;
-var _origCriticalln = console.criticalln;
+var _logPath = null;
 
-console.writeln = function(msg) {
+// V8 ランタイムの console.writeln は書き換え不可（writable: false）で、
+// 代入は例外も出ずに無視される（1.9.4 で実測）。差し替えで出力を集める方式は
+// 使えないので、テストは値を log() で残すこと。スクリプト本体の console 出力は
+// ログファイルに入らない（PixInsight の Process Console にだけ出る）。
+
+/**
+ * ログファイルとコンソールの両方に 1 行書く。
+ * runAllTests() の実行中は、呼ばれるたびにログファイルを書き直す（逐次書き出し）。
+ * 途中で例外や強制終了があっても、そこまでの行が残る。
+ */
+function log(msg) {
     var s = String(msg === undefined ? "" : msg);
     _logLines.push(s);
-    _origWriteln.call(console, msg);
-};
-console.warningln = function(msg) {
-    var s = "[WARN] " + String(msg === undefined ? "" : msg);
-    _logLines.push(s);
-    _origWarningln.call(console, msg);
-};
-console.criticalln = function(msg) {
-    var s = "[CRIT] " + String(msg === undefined ? "" : msg);
-    _logLines.push(s);
-    _origCriticalln.call(console, msg);
-};
+    console.writeln(s);
+    if (_logPath !== null) {
+        File.writeTextFile(_logPath, _logLines.join("\n") + "\n");
+    }
+}
 
 /**
  * テストを登録する
@@ -106,34 +105,40 @@ function runAllTests(outputPath) {
     _failed = 0;
     _errors = [];
 
-    console.writeln("=== PJSR Test Framework ===");
-    console.writeln("Total tests: " + _tests.length);
-    console.writeln("---------------------------");
+    // 結果ディレクトリとログのパスを先に決める（log() が逐次書き出せるように）
+    var dir = File.extractDrive(outputPath) + File.extractDirectory(outputPath);
+    if (!File.directoryExists(dir)) {
+        File.createDirectory(dir, true);
+    }
+    // File.extractDirectory() の戻り値は末尾に "/" が付かない
+    var baseName = File.extractName(outputPath);  // e.g. "test_foo_result"
+    _logPath = dir + "/" + baseName.replace(/_result$/, "") + ".log";
+    var pending = _logLines;   // runAllTests() より前に log() された行も残す
+    _logLines = [];
+    for (var p = 0; p < pending.length; p++) log(pending[p]);
+
+    log("=== PJSR Test Framework ===");
+    log("Total tests: " + _tests.length);
+    log("---------------------------");
 
     for (var i = 0; i < _tests.length; i++) {
         var t = _tests[i];
         try {
             t.fn();
             _passed++;
-            console.writeln("  PASS: " + t.name);
+            log("  PASS: " + t.name);
         } catch (e) {
             _failed++;
             var errMsg = (e && e.message) ? e.message : String(e);
             _errors.push({ name: t.name, error: errMsg });
-            console.writeln("  FAIL: " + t.name);
-            console.writeln("    " + errMsg);
+            log("  FAIL: " + t.name);
+            log("    " + errMsg);
         }
     }
 
-    console.writeln("---------------------------");
-    console.writeln("passed=" + _passed + "  failed=" + _failed);
-    console.writeln("===========================");
-
-    // 結果ディレクトリを作成
-    var dir = File.extractDrive(outputPath) + File.extractDirectory(outputPath);
-    if (!File.directoryExists(dir)) {
-        File.createDirectory(dir, true);
-    }
+    log("---------------------------");
+    log("passed=" + _passed + "  failed=" + _failed);
+    log("===========================");
 
     // 結果をJSONに書き出す
     var result = {
@@ -146,17 +151,10 @@ function runAllTests(outputPath) {
     f.createForWriting(outputPath);
     f.outText(JSON.stringify(result, null, 2));
     f.close();
-    console.writeln("Result written to: " + outputPath);
+    log("Result written to: " + outputPath);
 
-    // ログファイルに全コンソール出力を書き出す
-    var baseName = File.extractName(outputPath);  // e.g. "test_foo_result"
-    // File.extractDirectory() の戻り値は末尾に "/" が付かない
-    var logPath = dir + "/" + baseName.replace(/_result$/, "") + ".log";
-    var lf = new File();
-    lf.createForWriting(logPath);
-    lf.outText(_logLines.join("\n"));
-    lf.close();
-    _origWriteln.call(console, "Log written to: " + logPath);
+    log("Log written to: " + _logPath);
+    _logPath = null;
 }
 
 // グローバルに公開
@@ -165,5 +163,6 @@ this.assertEqual = assertEqual;
 this.assertTrue  = assertTrue;
 this.assertFalse = assertFalse;
 this.runAllTests = runAllTests;
+this.log         = log;
 
 }).call(this);

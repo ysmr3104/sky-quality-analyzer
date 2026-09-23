@@ -40,7 +40,7 @@ test("aperturePhotometry: flux changes <= 2% for a 0.3 px center shift", functio
     } finally {
         win.forceClose();
     }
-    console.writeln("  star center (integer) = (" + center.x + ", " + center.y + ")");
+    log("  star center (integer) = (" + center.x + ", " + center.y + ")");
 
     var apInt = aperturePhotometry(FRAME_10S, center.x, center.y, APERTURE, meta.bitsPerSample, "G", null);
     assertTrue(apInt !== null, "aperturePhotometry (integer center) returned null");
@@ -52,7 +52,7 @@ test("aperturePhotometry: flux changes <= 2% for a 0.3 px center shift", functio
     assertTrue(!isNaN(apShifted.adu_star) && apShifted.adu_star > 0, "shifted-center flux should be positive");
 
     var diffPct = Math.abs(apShifted.adu_star - apInt.adu_star) / apInt.adu_star * 100;
-    console.writeln("  flux(int)=" + apInt.adu_star.toFixed(1)
+    log("  flux(int)=" + apInt.adu_star.toFixed(1)
         + "  flux(+0.3px)=" + apShifted.adu_star.toFixed(1)
         + "  diff=" + diffPct.toFixed(3) + "%");
     assertTrue(diffPct <= 2.0, "flux difference for a 0.3 px center shift should be <= 2%, got "

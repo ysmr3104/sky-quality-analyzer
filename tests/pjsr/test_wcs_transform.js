@@ -41,7 +41,7 @@ function assertStarAtProjectedPosition(filepath, label) {
 
         var pt = win.celestialToImage(KOCHAB_RA, KOCHAB_DEC);
         assertTrue(pt !== null, label + ": celestialToImage returned null");
-        console.writeln("  " + label + ": celestialToImage(Kochab) = ("
+        log("  " + label + ": celestialToImage(Kochab) = ("
             + pt.x.toFixed(2) + ", " + pt.y.toFixed(2) + ")");
 
         var image = win.mainView.image;
@@ -89,7 +89,7 @@ function assertStarAtProjectedPosition(filepath, label) {
         }
         var bgMedian = median(ringVals);
 
-        console.writeln("  " + label + ": max=" + maxVal.toFixed(5)
+        log("  " + label + ": max=" + maxVal.toFixed(5)
             + " bgMedian=" + bgMedian.toFixed(5) + " diff=" + (maxVal - bgMedian).toFixed(5));
         assertTrue(maxVal - bgMedian >= 0.5, label + ": max aperture value ("
             + maxVal.toFixed(5) + ") should exceed background median ("
@@ -118,7 +118,7 @@ test("imageToCelestial / celestialToImage round-trip within 0.1 px", function() 
         assertTrue(celestial !== null, "imageToCelestial returned null");
         var back = win.celestialToImage(celestial.x, celestial.y);
         assertTrue(back !== null, "celestialToImage returned null");
-        console.writeln("  orig=(" + origX + "," + origY + ")"
+        log("  orig=(" + origX + "," + origY + ")"
             + "  celestial=(" + celestial.x.toFixed(4) + "," + celestial.y.toFixed(4) + ")"
             + "  back=(" + back.x.toFixed(2) + "," + back.y.toFixed(2) + ")");
         assertEqual(back.x, origX, "round-trip X", 0.1);
