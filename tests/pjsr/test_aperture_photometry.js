@@ -1,3 +1,4 @@
+#engine v8
 // test_aperture_photometry.js
 // PJSR test: aperturePhotometry() accepts a fractional star center.
 // A 0.3 px shift in the center should change the measured flux by <= 2%.
