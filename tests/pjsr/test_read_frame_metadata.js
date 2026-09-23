@@ -1,3 +1,4 @@
+#engine v8
 // test_read_frame_metadata.js
 // PJSR test: readFrameMetadata() — EXPTIME, isColor, WCS loading from XISF files
 //

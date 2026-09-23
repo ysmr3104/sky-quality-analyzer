@@ -1,3 +1,4 @@
+#engine v8
 // test_wcs_transform.js
 // PJSR test: native astrometric solution (ImageWindow.celestialToImage /
 // imageToCelestial) — verified against an independent criterion (does the

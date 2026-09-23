@@ -1,3 +1,4 @@
+#engine v8
 // test_measure_background.js
 // PJSR test: measureBackground() and computeLSky()
 // Uses Kochab test frames (2026-03-27). Background ROI from kochab log: (2922, 1519).
