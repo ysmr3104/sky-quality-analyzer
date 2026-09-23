@@ -45,25 +45,12 @@ test("readFrameMetadata: isColor=true for debayered XISF", function() {
 });
 
 // ============================================================
-// readFrameMetadata: WCS loaded from XISF binary header
+// readFrameMetadata: hasWcs — native astrometric solution flag
 // ============================================================
-test("readFrameMetadata: WCS loaded (CRPIX1, CRVAL1, CD1_1 not NaN)", function() {
+test("readFrameMetadata: hasWcs=true for plate-solved XISF", function() {
     var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[0].file);
     assertTrue(meta !== null, "readFrameMetadata returned null");
-    assertTrue(meta.wcs !== null, "WCS should be present in plate-solved XISF");
-    assertTrue(!isNaN(meta.wcs.crpix1), "crpix1 should not be NaN");
-    assertTrue(!isNaN(meta.wcs.crval1), "crval1 should not be NaN");
-    assertTrue(!isNaN(meta.wcs.cd11),   "cd11 should not be NaN");
-});
-
-// ============================================================
-// readFrameMetadata: imageHeight stored in WCS
-// ============================================================
-test("readFrameMetadata: wcs.imageHeight > 0", function() {
-    var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[0].file);
-    assertTrue(meta !== null, "readFrameMetadata returned null");
-    assertTrue(meta.wcs !== null, "WCS should be present");
-    assertTrue(meta.wcs.imageHeight > 0, "wcs.imageHeight should be > 0");
+    assertEqual(meta.hasWcs, true, "hasWcs should be true for a plate-solved WBPP frame");
 });
 
 runAllTests(RESULT_PATH);

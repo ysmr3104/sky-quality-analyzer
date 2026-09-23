@@ -90,7 +90,7 @@ function getFITSKeyword(keywords, name) {
 }
 
 // Read frame metadata from a FITS file without keeping it open.
-// Returns { filepath, exptime, instrume, gain, isColor, bitsPerSample }
+// Returns { filepath, exptime, instrume, gain, isColor, bitsPerSample, hasWcs }
 // or null on error.
 function readFrameMetadata(filepath) {
    var wins = ImageWindow.open(filepath);
@@ -109,32 +109,14 @@ function readFrameMetadata(filepath) {
 
    var isColor       = (image.numberOfChannels >= 3);
    var bitsPerSample = image.bitsPerSample;
-   var imgHeight     = image.height;
 
-   // Try WCS from keywords first
-   var crpix1 = parseFloat(getFITSKeyword(kws, "CRPIX1"));
-   var crpix2 = parseFloat(getFITSKeyword(kws, "CRPIX2"));
-   var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1"));
-   var crval2 = parseFloat(getFITSKeyword(kws, "CRVAL2"));
-   var cd11   = parseFloat(getFITSKeyword(kws, "CD1_1"));
-   var cd12   = parseFloat(getFITSKeyword(kws, "CD1_2"));
-   var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
-   var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
-   var wcs = null;
-   if (!isNaN(crpix1) && !isNaN(crval1) && !isNaN(cd11)) {
-      wcs = { crpix1: crpix1, crpix2: crpix2, crval1: crval1, crval2: crval2,
-              cd11: cd11, cd12: cd12, cd21: cd21, cd22: cd22, imageHeight: imgHeight };
-   }
+   // Native astrometric solution check (WBPP attaches one to solved frames).
+   var hasWcs = (win.hasAstrometricSolution === true);
 
    win.close();
 
-   // XISF fallback: win is closed above, so file is available for File API
-   if (!wcs && filepath.toLowerCase().indexOf(".xisf") >= 0) {
-      wcs = readXISFHeaderWCS(filepath, imgHeight);
-   }
-   if (wcs) {
-      console.writeln("  WCS loaded: CRPIX1=" + wcs.crpix1.toFixed(1)
-         + " CD2_2=" + wcs.cd22.toFixed(6));
+   if (hasWcs) {
+      console.writeln("  Astrometric solution: present");
    }
 
    if (isNaN(exptime) || exptime <= 0) {
@@ -150,7 +132,7 @@ function readFrameMetadata(filepath) {
       gain:          gain,
       isColor:       isColor,
       bitsPerSample: bitsPerSample,
-      wcs:           wcs
+      hasWcs:        hasWcs
    };
 }
 
@@ -212,174 +194,6 @@ function searchStarInfo(objectName) {
 
    if (result.ra === null) return null;
    return result;
-}
-
-//============================================================================
-// WCS: read keywords and convert pixel coordinates to RA/Dec
-//============================================================================
-
-// Read WCS from an XISF binary header.
-// PixInsight WBPP stores WCS as <FITSKeyword> elements inside the XISF XML header,
-// but they are NOT exposed via win.keywords. Parse the header directly.
-// imageHeight: pass image.height from the already-opened ImageWindow.
-function readXISFHeaderWCS(filepath, imageHeight) {
-   dbg("readXISFHeaderWCS: " + filepath);
-   var xml = "";
-   try {
-      // Open file for reading (PixInsight PJSR File API)
-      var f = new File;
-      f.open(filepath, FileMode.Read);
-      dbg("  file opened OK, size=" + f.size);
-
-      // Read and verify XISF signature (8 bytes: "XISF0100")
-      var sig = f.read(DataType.ByteArray, 8);
-      dbg("  typeof sig=" + typeof sig + " sig.length=" + (sig ? sig.length : "null"));
-
-      dbg("  sig[0..3]=" + sig[0] + "," + sig[1] + "," + sig[2] + "," + sig[3]);
-      if (sig[0] !== 88 || sig[1] !== 73 || sig[2] !== 83 || sig[3] !== 70) {
-         f.close();
-         dbg("  not XISF (bad signature)");
-         return null; // not XISF
-      }
-
-      // Read header length (uint32 LE, 4 bytes)
-      var lb = f.read(DataType.ByteArray, 4);
-      var hdrLen = lb[0] | (lb[1] << 8) | (lb[2] << 16) | (lb[3] << 24);
-      dbg("  hdrLen=" + hdrLen);
-
-      // Skip 4 reserved bytes
-      f.read(DataType.ByteArray, 4);
-
-      // Read the full XML header (WCS keywords may appear anywhere in the header)
-      var readLimit = hdrLen;
-      dbg("  reading " + readLimit + " bytes of XML header");
-      var xmlBytes = f.read(DataType.ByteArray, readLimit);
-      f.close();
-      dbg("  xmlBytes.length=" + xmlBytes.length);
-
-      // Convert ByteArray → string byte by byte
-      for (var si = 0; si < xmlBytes.length; si++) {
-         xml += String.fromCharCode(xmlBytes[si]);
-         // Early stop once WCS keywords are found (avoid processing whole header)
-         if (si > 4096 && xml.indexOf("CD2_2") >= 0 && xml.indexOf("CRPIX2") >= 0) break;
-      }
-   } catch(e) {
-      dbg("  EXCEPTION: " + e.message);
-      console.writeln("[SQM] readXISFHeaderWCS failed: " + e.message);
-      return null;
-   }
-
-   dbg("  xml length=" + xml.length + " CD2_2=" + (xml.indexOf("CD2_2")>=0) + " CRPIX1=" + (xml.indexOf("CRPIX1")>=0));
-   if (!xml) return null;
-
-   // Extract value attribute from <FITSKeyword name="X" value="Y" .../>
-   var extractKW = function(name) {
-      var tag = 'name="' + name + '" value="';
-      var idx = xml.indexOf(tag);
-      if (idx < 0) return null;
-      idx += tag.length;
-      var end = xml.indexOf('"', idx);
-      return (end >= 0) ? xml.substring(idx, end) : null;
-   };
-
-   var crpix1 = parseFloat(extractKW("CRPIX1"));
-   var crpix2 = parseFloat(extractKW("CRPIX2"));
-   var crval1 = parseFloat(extractKW("CRVAL1"));
-   var crval2 = parseFloat(extractKW("CRVAL2"));
-   var cd11   = parseFloat(extractKW("CD1_1"));
-   var cd12   = parseFloat(extractKW("CD1_2"));
-   var cd21   = parseFloat(extractKW("CD2_1"));
-   var cd22   = parseFloat(extractKW("CD2_2"));
-
-   dbg("  extracted: CRPIX1=" + crpix1 + " CRVAL1=" + crval1 + " CD1_1=" + cd11);
-   if (isNaN(crpix1) || isNaN(crval1) || isNaN(cd11)) {
-      dbg("  WCS extraction failed (NaN values)");
-      return null;
-   }
-
-   dbg("  XISF WCS OK");
-   return { crpix1: crpix1, crpix2: crpix2,
-            crval1: crval1, crval2: crval2,
-            cd11: cd11, cd12: cd12,
-            cd21: cd21, cd22: cd22,
-            imageHeight: imageHeight };
-}
-
-// Read WCS keywords from a FITS/XISF file.
-// Returns a wcs object or null if keywords are missing.
-function readWCS(filepath) {
-   dbg("readWCS: " + File.extractName(filepath));
-   var wins = ImageWindow.open(filepath);
-   if (!wins || wins.length === 0) { dbg("  ImageWindow.open failed"); return null; }
-   var win = wins[0];
-   var kws = win.keywords;
-   var h   = win.mainView.image.height;
-   dbg("  keywords count=" + kws.length + " imageHeight=" + h);
-   win.close();
-
-   // Try standard FITS keywords first (works for plain FITS files)
-   var crpix1 = parseFloat(getFITSKeyword(kws, "CRPIX1"));
-   var crpix2 = parseFloat(getFITSKeyword(kws, "CRPIX2"));
-   var crval1 = parseFloat(getFITSKeyword(kws, "CRVAL1"));
-   var crval2 = parseFloat(getFITSKeyword(kws, "CRVAL2"));
-   var cd11   = parseFloat(getFITSKeyword(kws, "CD1_1"));
-   var cd12   = parseFloat(getFITSKeyword(kws, "CD1_2"));
-   var cd21   = parseFloat(getFITSKeyword(kws, "CD2_1"));
-   var cd22   = parseFloat(getFITSKeyword(kws, "CD2_2"));
-   dbg("  FITS kw: CRPIX1=" + crpix1 + " CRVAL1=" + crval1 + " CD1_1=" + cd11);
-
-   if (!isNaN(crpix1) && !isNaN(crval1) && !isNaN(cd11)) {
-      dbg("  WCS found in win.keywords");
-      return { crpix1: crpix1, crpix2: crpix2,
-               crval1: crval1, crval2: crval2,
-               cd11: cd11, cd12: cd12,
-               cd21: cd21, cd22: cd22,
-               imageHeight: h };
-   }
-
-   // Fallback: XISF files from PixInsight WBPP store WCS in the binary XML header
-   if (filepath.toLowerCase().indexOf(".xisf") >= 0) {
-      dbg("  falling back to XISF binary header parse");
-      return readXISFHeaderWCS(filepath, h);
-   }
-
-   return null;
-}
-
-// Convert PixInsight pixel (0-indexed, y-down) to RA/Dec using TAN projection.
-// Small-angle approximation — accurate to ~1 arcsec for fields < 3 degrees.
-function pixelToRaDec(wcs, px, py) {
-   var fitsX = px + 1.0;
-   var fitsY = wcs.imageHeight - py;        // y-flip: PixInsight y-down → FITS y-up
-   var dx = fitsX - wcs.crpix1;
-   var dy = fitsY - wcs.crpix2;
-   var xi  = wcs.cd11 * dx + wcs.cd12 * dy; // degrees
-   var eta = wcs.cd21 * dx + wcs.cd22 * dy;
-   var dec0 = wcs.crval2 * Math.PI / 180.0;
-   var ra   = wcs.crval1 + xi / Math.cos(dec0);
-   var dec  = wcs.crval2 + eta;
-   while (ra <    0) ra += 360;
-   while (ra >= 360) ra -= 360;
-   return { ra: ra, dec: dec };
-}
-
-// Inverse: RA/Dec → PixInsight pixel (0-indexed, y-down).
-// Returns { px, py } or null if the CD matrix is singular.
-function raDecToPixel(wcs, ra, dec) {
-   var dec0 = wcs.crval2 * Math.PI / 180.0;
-   var xi   = (ra - wcs.crval1) * Math.cos(dec0);
-   var eta  = dec - wcs.crval2;
-   // Invert CD matrix: [dx, dy] = CD^-1 * [xi, eta]
-   var det = wcs.cd11 * wcs.cd22 - wcs.cd12 * wcs.cd21;
-   if (Math.abs(det) < 1e-20) return null;
-   var dx = ( wcs.cd22 * xi - wcs.cd12 * eta) / det;
-   var dy = (-wcs.cd21 * xi + wcs.cd11 * eta) / det;
-   var fitsX = dx + wcs.crpix1;
-   var fitsY = dy + wcs.crpix2;
-   // Convert FITS (1-indexed, y-up) → PixInsight (0-indexed, y-down)
-   var px = Math.round(fitsX - 1.0);
-   var py = Math.round(wcs.imageHeight - fitsY);
-   return { px: px, py: py };
 }
 
 //============================================================================
@@ -844,17 +658,20 @@ constructor(parent, mode) {
 //============================================================================
 
 var PointSelectionDialog = class extends Dialog {
-constructor(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
+constructor(parent, title, filepath, mode, aperture, pixelScale) {
       super();
 
    var self = this;
-   this.selectedX    = -1;
-   this.selectedY    = -1;
-   this.selectedStar = null; // filled when catalog star is chosen
-   this.wcs          = preloadedWcs || null; // WCS pre-loaded by caller (avoids re-reading locked file)
-   this.pixelScale   = (pixelScale > 0) ? pixelScale : 0;
-   this.filepath     = filepath;
-   this.mode         = mode;
+   this.selectedX     = -1;
+   this.selectedY     = -1;
+   this.selectedStar  = null;   // filled when catalog star is chosen
+   this.selectedRaDec = null;   // { ra, dec } once a position is tied to sky coordinates
+   this.hasWcs        = false;  // set once the retained window is opened below
+   this.win           = null;   // retained ImageWindow — kept open for celestialToImage/imageToCelestial;
+                                 // caller MUST call releaseImage() after execute()
+   this.pixelScale    = (pixelScale > 0) ? pixelScale : 0;
+   this.filepath      = filepath;
+   this.mode          = mode;
 
    this.windowTitle = title;
    this.minWidth    = 720;
@@ -886,28 +703,36 @@ constructor(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
       this.catalogBtn.toolTip = "Query SIMBAD for stars near the clicked position";
       this.catalogBtn.enabled = false;
       this.catalogBtn.onClick = function() {
-         if (!self.wcs) {
+         if (!self.hasWcs || !self.win) {
             var mb = new MessageBox(
-               "No WCS astrometric solution found in this frame.\n"
+               "No astrometric solution found in this frame.\n"
                + "Please plate-solve the images first, or enter the star name manually.",
                TITLE, StdIcon.Warning, StdButton.Ok);
             mb.execute();
             return;
          }
-         var pos = pixelToRaDec(self.wcs, self.selectedX, self.selectedY);
+         var pos = self.win.imageToCelestial(self.selectedX, self.selectedY);
+         if (!pos) {
+            var mb = new MessageBox(
+               "The clicked position falls outside the astrometric solution.\n"
+               + "Please click closer to the center of the image.",
+               TITLE, StdIcon.Warning, StdButton.Ok);
+            mb.execute();
+            return;
+         }
          // Search 120' (2°) radius for V < 9 to find bright reference stars across the whole image.
          // Fall back to V < 11 if nothing bright is found.
-         console.writeln("SIMBAD query: RA=" + pos.ra.toFixed(4)
-            + " Dec=" + pos.dec.toFixed(4) + " radius=120' V<9");
+         console.writeln("SIMBAD query: RA=" + pos.x.toFixed(4)
+            + " Dec=" + pos.y.toFixed(4) + " radius=120' V<9");
          console.flush();
-         var stars = querySIMBADNearby(pos.ra, pos.dec, 120);
+         var stars = querySIMBADNearby(pos.x, pos.y, 120);
          if (!stars || stars.length === 0) {
             // Retry with fainter limit
             console.writeln("  No V<9 stars found, retrying V<11...");
             var adqlFaint = "SELECT TOP 30 main_id, ra, dec, V "
                + "FROM basic JOIN allfluxes ON oid = oidref "
                + "WHERE CONTAINS(POINT('ICRS',ra,dec),"
-               +   "CIRCLE('ICRS'," + pos.ra.toFixed(6) + "," + pos.dec.toFixed(6) + ",2.0))=1 "
+               +   "CIRCLE('ICRS'," + pos.x.toFixed(6) + "," + pos.y.toFixed(6) + ",2.0))=1 "
                + "AND V IS NOT NULL AND V < 11.0 ORDER BY V";
             var outFile2 = File.systemTempDirectory + "/sqm_simbad_faint.txt";
             var url2 = "http://simbad.u-strasbg.fr/simbad/sim-tap/sync"
@@ -931,16 +756,14 @@ constructor(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
             return;
          }
          // Filter to stars that project within the image bounds.
-         var imgW2   = self.imgWidth  || 0;
-         var imgH2   = self.wcs ? self.wcs.imageHeight : 0;
          var inFrame = [];
          for (var si = 0; si < stars.length; si++) {
-            var fp2 = raDecToPixel(self.wcs, stars[si].ra, stars[si].dec);
-            if (!fp2) continue;
-            if (imgW2 > 0 && (fp2.px < 0 || fp2.px >= imgW2)) continue;
-            if (imgH2 > 0 && (fp2.py < 0 || fp2.py >= imgH2)) continue;
-            stars[si].px = fp2.px;
-            stars[si].py = fp2.py;
+            var pt = self.win.celestialToImage(stars[si].ra, stars[si].dec);
+            if (!pt) continue;
+            if (pt.x < 0 || pt.x >= self.imgWidth)  continue;
+            if (pt.y < 0 || pt.y >= self.imgHeight) continue;
+            stars[si].px = pt.x;
+            stars[si].py = pt.y;
             inFrame.push(stars[si]);
          }
          if (inFrame.length === 0) {
@@ -954,22 +777,18 @@ constructor(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
          }
          var catalogDlg = new NearbyStarDialog(inFrame, self.preview.aperture, self.pixelScale);
          if (catalogDlg.execute() === 1 && catalogDlg.selectedStar) {
-            self.selectedStar = catalogDlg.selectedStar;
+            self.selectedStar  = catalogDlg.selectedStar;
+            self.selectedRaDec = { ra: self.selectedStar.ra, dec: self.selectedStar.dec };
             // Update pixel position to the actual projected position of the catalog star
-            if (self.wcs) {
-               console.writeln("  WCS: CRPIX1=" + self.wcs.crpix1.toFixed(2)
-                  + " CRPIX2=" + self.wcs.crpix2.toFixed(2)
-                  + " CD2_2=" + self.wcs.cd22.toFixed(7));
-               console.writeln("  Star RA=" + self.selectedStar.ra.toFixed(4)
-                  + " Dec=" + self.selectedStar.dec.toFixed(4));
-               var fp = raDecToPixel(self.wcs, self.selectedStar.ra, self.selectedStar.dec);
-               if (fp) {
-                  self.selectedX = fp.px;
-                  self.selectedY = fp.py;
-                  console.writeln("  Catalog star projected to pixel: (" + self.selectedX + "," + self.selectedY + ")");
-               } else {
-                  console.writeln("  [WARN] raDecToPixel returned null (singular CD matrix?)");
-               }
+            console.writeln("  Star RA=" + self.selectedStar.ra.toFixed(4)
+               + " Dec=" + self.selectedStar.dec.toFixed(4));
+            var imgPt = self.win.celestialToImage(self.selectedStar.ra, self.selectedStar.dec);
+            if (imgPt) {
+               self.selectedX = Math.round(imgPt.x);
+               self.selectedY = Math.round(imgPt.y);
+               console.writeln("  Catalog star projected to pixel: (" + self.selectedX + "," + self.selectedY + ")");
+            } else {
+               console.writeln("  [WARN] celestialToImage returned null (outside solution range?)");
             }
             self.coordLabel.text = "Position: X=" + self.selectedX + "  Y=" + self.selectedY
                + "   →  " + self.selectedStar.id + "  V=" + self.selectedStar.vmag.toFixed(3);
@@ -980,6 +799,12 @@ constructor(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
    this.preview.onImageClick = function(imgX, imgY) {
       self.selectedX = Math.round(imgX);
       self.selectedY = Math.round(imgY);
+      self.selectedStar  = null;
+      self.selectedRaDec = null;
+      if (self.hasWcs && self.win) {
+         var celestial = self.win.imageToCelestial(imgX, imgY);
+         if (celestial) self.selectedRaDec = { ra: celestial.x, dec: celestial.y };
+      }
       self.coordLabel.text = "Position: X=" + self.selectedX + "  Y=" + self.selectedY;
       if (self.catalogBtn) self.catalogBtn.enabled = true;
    };
@@ -1016,64 +841,43 @@ constructor(parent, title, filepath, mode, aperture, preloadedWcs, pixelScale) {
    this.sizer.add(this.preview, 100);
    this.sizer.add(btnSizer);
 
-   // Load preview bitmap + read WCS
+   // Load preview bitmap. The window is kept open (not closed here) so that
+   // celestialToImage()/imageToCelestial() remain usable for the dialog's lifetime;
+   // the caller must call releaseImage() after execute() returns.
    var wins = ImageWindow.open(filepath);
    if (wins && wins.length > 0) {
-      var win        = wins[0];
-      var image      = win.mainView.image;
-      var imgH       = image.height; // save before win.close()
-      var imgW       = image.width;
-      this.imgWidth  = imgW;         // used for out-of-frame check in catalog lookup
-      var kws        = win.keywords;
+      var win   = wins[0];
+      var image = win.mainView.image;
+      this.win       = win;
+      this.imgWidth  = image.width;   // used for out-of-frame check in catalog lookup
+      this.imgHeight = image.height;
+      this.hasWcs    = (win.hasAstrometricSolution === true);
       console.writeln("Generating preview for: " + File.extractName(filepath));
       console.flush();
       var bmpResult = createStretchedBitmap(image, MAX_BMP_EDGE);
       this.preview.setBitmap(bmpResult);
 
-      // WCS for catalog lookup: use pre-loaded WCS passed by caller.
-      // If not available, try FITS keywords or XISF binary header (close win FIRST to release file lock).
       if (mode === "star") {
-         if (this.wcs) {
-            console.writeln("  WCS available — catalog lookup enabled.");
-            console.writeln("  CRPIX1=" + this.wcs.crpix1 + " CRPIX2=" + this.wcs.crpix2
-               + " CRVAL1=" + this.wcs.crval1 + " CRVAL2=" + this.wcs.crval2);
-            console.writeln("  CD1_1=" + this.wcs.cd11 + " CD2_2=" + this.wcs.cd22);
+         if (this.hasWcs) {
+            console.writeln("  Astrometric solution available — catalog lookup enabled.");
          } else {
-            // No pre-loaded WCS: try FITS keywords
-            var wcsObj = null;
-            var crpix1k = parseFloat(getFITSKeyword(kws, "CRPIX1"));
-            var crpix2k = parseFloat(getFITSKeyword(kws, "CRPIX2"));
-            var crval1k = parseFloat(getFITSKeyword(kws, "CRVAL1"));
-            var crval2k = parseFloat(getFITSKeyword(kws, "CRVAL2"));
-            var cd11k   = parseFloat(getFITSKeyword(kws, "CD1_1"));
-            var cd12k   = parseFloat(getFITSKeyword(kws, "CD1_2"));
-            var cd21k   = parseFloat(getFITSKeyword(kws, "CD2_1"));
-            var cd22k   = parseFloat(getFITSKeyword(kws, "CD2_2"));
-            if (!isNaN(crpix1k) && !isNaN(crval1k) && !isNaN(cd11k)) {
-               wcsObj = { crpix1: crpix1k, crpix2: crpix2k,
-                          crval1: crval1k, crval2: crval2k,
-                          cd11: cd11k, cd12: cd12k,
-                          cd21: cd21k, cd22: cd22k,
-                          imageHeight: imgH };
-            }
-            win.close(); // release file lock BEFORE trying XISF binary read
-            if (!wcsObj && filepath.toLowerCase().indexOf(".xisf") >= 0) {
-               wcsObj = readXISFHeaderWCS(filepath, imgH);
-            }
-            if (wcsObj) {
-               this.wcs = wcsObj;
-               console.writeln("  WCS available — catalog lookup enabled.");
-            } else {
-               console.writeln("  No WCS found — catalog lookup unavailable.");
-            }
-            return; // win already closed above
+            console.writeln("  No astrometric solution — catalog lookup unavailable.");
          }
       }
-      win.close();
    } else {
       var mb = new MessageBox("Cannot open file:\n" + filepath, TITLE, StdIcon.Error, StdButton.Ok);
       mb.execute();
    }
+   }
+
+   // Close the retained preview window. Must be called by the caller after execute()
+   // (typically in a try/finally), since the constructor keeps it open for
+   // celestialToImage()/imageToCelestial() calls made from onClick handlers.
+   releaseImage() {
+      if (this.win) {
+         this.win.forceClose();
+         this.win = null;
+      }
    }
 };
 
@@ -1115,18 +919,37 @@ function measureBackground(filepath, bgX, bgY, bitsPerSample, sqmChannel) {
 
 //============================================================================
 // Aperture photometry
-// Returns { adu_star, saturated_fraction }
+// Returns { adu_star, saturated_fraction, starX, starY }
 // - adu_star: net star flux (aperture sum minus sky background).
 //   Saturated pixels are excluded; flux is scaled to full aperture area.
 // - saturated_fraction: fraction of aperture pixels at or above SAT_THRESHOLD.
 //   Frames with saturated_fraction > 0.3 are excluded from the L_star fit.
+// - starX/starY: the fractional center actually used for this frame — the
+//   WCS-projected position (via celestialToImage) when starRaDec is given and
+//   this frame has an astrometric solution, otherwise the starX/starY passed in.
+//
+// Center/distance convention: pixel (ix, iy) is treated as covering
+// [ix, ix+1) x [iy, iy+1), i.e. its center is (ix+0.5, iy+0.5) (assumed PCL
+// convention — the 0.5 px offset is negligible against a 15 px aperture).
 //============================================================================
 
-function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqmChannel) {
+function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqmChannel, starRaDec) {
    var wins = ImageWindow.open(filepath);
    if (!wins || wins.length === 0) return null;
    var win   = wins[0];
    var image = win.mainView.image;
+
+   // Per-frame star center: prefer the WCS-projected position for this specific
+   // frame's solution over the fixed pixel coordinates passed in.
+   var cx = starX;
+   var cy = starY;
+   if (starRaDec && win.hasAstrometricSolution === true) {
+      var projected = win.celestialToImage(starRaDec.ra, starRaDec.dec);
+      if (projected) {
+         cx = projected.x;
+         cy = projected.y;
+      }
+   }
 
    var isColor  = (image.numberOfChannels >= 3);
    var ch       = (isColor && sqmChannel === "G") ? 1 : 0;
@@ -1139,12 +962,18 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
 
    // Sky annulus — sigma-clipped, SExtractor-style mode estimate
    var skyPixels = [];
-   for (var y = starY - r_out - 1; y <= starY + r_out + 1; y++) {
+   var skyYLo = Math.floor(cy - r_out) - 1;
+   var skyYHi = Math.ceil(cy + r_out) + 1;
+   var skyXLo = Math.floor(cx - r_out) - 1;
+   var skyXHi = Math.ceil(cx + r_out) + 1;
+   for (var y = skyYLo; y <= skyYHi; y++) {
       if (y < 0 || y >= image.height) continue;
-      for (var x = starX - r_out - 1; x <= starX + r_out + 1; x++) {
+      var skyPy = y + 0.5;
+      for (var x = skyXLo; x <= skyXHi; x++) {
          if (x < 0 || x >= image.width) continue;
-         var dx = x - starX;
-         var dy = y - starY;
+         var skyPx = x + 0.5;
+         var dx = skyPx - cx;
+         var dy = skyPy - cy;
          var dist = Math.sqrt(dx * dx + dy * dy);
          if (dist >= r_in && dist <= r_out) {
             skyPixels.push(image.sample(x, y, ch) * maxADU);
@@ -1161,12 +990,18 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
    var aperSum  = 0;
    var apCount  = 0;
    var satCount = 0;
-   for (var y = starY - r_ap - 1; y <= starY + r_ap + 1; y++) {
+   var apYLo = Math.floor(cy - r_ap) - 1;
+   var apYHi = Math.ceil(cy + r_ap) + 1;
+   var apXLo = Math.floor(cx - r_ap) - 1;
+   var apXHi = Math.ceil(cx + r_ap) + 1;
+   for (var y = apYLo; y <= apYHi; y++) {
       if (y < 0 || y >= image.height) continue;
-      for (var x = starX - r_ap - 1; x <= starX + r_ap + 1; x++) {
+      var apPy = y + 0.5;
+      for (var x = apXLo; x <= apXHi; x++) {
          if (x < 0 || x >= image.width) continue;
-         var dx = x - starX;
-         var dy = y - starY;
+         var apPx = x + 0.5;
+         var dx = apPx - cx;
+         var dy = apPy - cy;
          if (dx * dx + dy * dy <= r_ap * r_ap) {
             apCount++;
             var pixADU = image.sample(x, y, ch) * maxADU;
@@ -1190,30 +1025,19 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
       netFlux = (aperSum - skyBg * usedCount) * (apCount / usedCount);
    }
    var saturated_fraction = (apCount > 0) ? (satCount / apCount) : 0;
-   return { adu_star: netFlux, saturated_fraction: saturated_fraction };
+   return { adu_star: netFlux, saturated_fraction: saturated_fraction, starX: cx, starY: cy };
 }
 
 //============================================================================
 // Main analysis: iterate over all frames, collect data, compute SQM
 //============================================================================
 
-function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry, telescopeEntry) {
+function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry, telescopeEntry, starRaDec) {
    if (!cameraEntry || !telescopeEntry) return null;
 
    var pixelScale    = computePixelScale(cameraEntry.pixel_pitch, telescopeEntry.focal_length, 1);
    var sqmChannel    = cameraEntry.sqm_channel || "G";
    var bitsPerSample = frames[0].bitsPerSample;
-
-   // Find a reference WCS (first solved frame) to get star RA/Dec
-   var refWcs = null;
-   for (var ri = 0; ri < frames.length; ri++) {
-      if (frames[ri].wcs) { refWcs = frames[ri].wcs; break; }
-   }
-   var starRaDec = null;
-   if (refWcs) {
-      starRaDec = pixelToRaDec(refWcs, starX, starY);
-      dbg("runAnalysis: star RA=" + starRaDec.ra.toFixed(4) + " Dec=" + starRaDec.dec.toFixed(4));
-   }
 
    var skyFrameData  = [];
    var starFrameData = [];
@@ -1222,22 +1046,14 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    for (var i = 0; i < frames.length; i++) {
       var f  = frames[i];
 
-      // Per-frame star position via WCS if available, else fall back to fixed coords
-      var fStarX = starX;
-      var fStarY = starY;
-      if (starRaDec && f.wcs) {
-         var fp = raDecToPixel(f.wcs, starRaDec.ra, starRaDec.dec);
-         if (fp) {
-            fStarX = fp.px;
-            fStarY = fp.py;
-            dbg("  frame " + f.filename + " star transformed: (" + fStarX + "," + fStarY + ")");
-         }
-      } else if (!f.wcs) {
-         console.writeln("  [WARN] No WCS for " + f.filename + " — using fixed star coords");
+      if (starRaDec && !f.hasWcs) {
+         console.writeln("  [WARN] No astrometric solution for " + f.filename + " — using fixed star coords");
       }
 
       var bg = measureBackground(f.filepath, bgX, bgY, bitsPerSample, sqmChannel);
-      var ap = aperturePhotometry(f.filepath, fStarX, fStarY, aperture, bitsPerSample, sqmChannel);
+      // aperturePhotometry projects starRaDec onto this frame via its own WCS
+      // when available, falling back to (starX, starY) otherwise.
+      var ap = aperturePhotometry(f.filepath, starX, starY, aperture, bitsPerSample, sqmChannel, starRaDec);
 
       if (!bg || !ap) {
          console.warningln("Skipping frame (measurement failed): " + f.filename);
@@ -1245,8 +1061,8 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       }
 
       var satPct = Math.round((ap.saturated_fraction || 0) * 100);
-      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%%  starXY=(%d,%d)",
-         f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, fStarX, fStarY));
+      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%%  starXY=(%.1f,%.1f)",
+         f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, ap.starX, ap.starY));
 
       skyFrameData.push({ exptime: f.exptime, adu_sky: bg.adu_sky });
       starFrameData.push({ exptime: f.exptime, adu_star: ap.adu_star, saturated_fraction: ap.saturated_fraction || 0 });
@@ -1339,6 +1155,7 @@ constructor() {
    this.bgY       = -1;           // Background ROI center Y
    this.starX     = -1;           // Reference star X
    this.starY     = -1;           // Reference star Y
+   this.starRaDec = null;         // { ra, dec } of the reference star, if tied to sky coordinates
    this.vmag      = NaN;          // V magnitude
    this.sqmResult = null;         // Last analysis result
 
@@ -1557,11 +1374,15 @@ constructor() {
       }
       var dlg = new PointSelectionDialog(self, "Select Background Region",
          bgFrame.filepath, "background", 0);
-      if (dlg.execute() === 1) {
-         self.bgX = dlg.selectedX;
-         self.bgY = dlg.selectedY;
-         self.bgPosLabel.text = "X=" + self.bgX + "  Y=" + self.bgY + "  (64×64 px region)";
-         self.updateUI();
+      try {
+         if (dlg.execute() === 1) {
+            self.bgX = dlg.selectedX;
+            self.bgY = dlg.selectedY;
+            self.bgPosLabel.text = "X=" + self.bgX + "  Y=" + self.bgY + "  (64×64 px region)";
+            self.updateUI();
+         }
+      } finally {
+         dlg.releaseImage();
       }
    };
 
@@ -1602,11 +1423,11 @@ constructor() {
             currentPs = computePixelScale(camE.pixel_pitch, teleE.focal_length, 1);
          }
       }
-      // Use longest-exposure frame with WCS (best SNR for star identification).
-      // Fall back to longest-exposure frame without WCS if none are solved.
+      // Use longest-exposure frame with an astrometric solution (best SNR for star
+      // identification). Fall back to longest-exposure frame without one if none are solved.
       var previewFrame = null;
       for (var fi = 0; fi < self.frames.length; fi++) {
-         if (self.frames[fi].wcs) {
+         if (self.frames[fi].hasWcs) {
             if (!previewFrame || self.frames[fi].exptime > previewFrame.exptime)
                previewFrame = self.frames[fi];
          }
@@ -1618,18 +1439,23 @@ constructor() {
          }
       }
       var dlg = new PointSelectionDialog(self, "Select Reference Star",
-         previewFrame.filepath, "star", ap, previewFrame.wcs, currentPs);
-      if (dlg.execute() === 1) {
-         self.starX = dlg.selectedX;
-         self.starY = dlg.selectedY;
-         self.starPosDisplay.text = "X=" + self.starX + "  Y=" + self.starY;
-         // Auto-fill name and V mag if a catalog star was identified
-         if (dlg.selectedStar) {
-            self.starNameEdit.text = dlg.selectedStar.id;
-            self.vmagEdit.text     = dlg.selectedStar.vmag.toFixed(3);
-            self.vmag              = dlg.selectedStar.vmag;
+         previewFrame.filepath, "star", ap, currentPs);
+      try {
+         if (dlg.execute() === 1) {
+            self.starX     = dlg.selectedX;
+            self.starY     = dlg.selectedY;
+            self.starRaDec = dlg.selectedRaDec || null;
+            self.starPosDisplay.text = "X=" + self.starX + "  Y=" + self.starY;
+            // Auto-fill name and V mag if a catalog star was identified
+            if (dlg.selectedStar) {
+               self.starNameEdit.text = dlg.selectedStar.id;
+               self.vmagEdit.text     = dlg.selectedStar.vmag.toFixed(3);
+               self.vmag              = dlg.selectedStar.vmag;
+            }
+            self.updateUI();
          }
-         self.updateUI();
+      } finally {
+         dlg.releaseImage();
       }
    };
 
@@ -1876,7 +1702,7 @@ constructor() {
       node.setText(0, f.filename);
       node.setText(1, f.exptime.toFixed(3));
       node.setText(2, f.isColor ? "Color" : "Mono");
-      node.setText(3, f.wcs ? "Yes" : "\u2014");
+      node.setText(3, f.hasWcs ? "Yes" : "\u2014");
 
       // Fill analysis columns if results are available
       var filled = false;
@@ -2017,7 +1843,7 @@ constructor() {
    try {
       var result = runAnalysis(
          this.frames, this.bgX, this.bgY, this.starX, this.starY,
-         aperture, this.vmag, cam, tele);
+         aperture, this.vmag, cam, tele, this.starRaDec);
 
       if (!result) {
          var mb = new MessageBox(
