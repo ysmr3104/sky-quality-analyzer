@@ -35,7 +35,7 @@ for (var i = 0; i < FRAMES.length; i++) {
         test("measureBackground: positive ADU at " + fx.exptime + "s", function() {
             var meta = readFrameMetadata(FIXTURE_DIR + fx.file);
             assertTrue(meta !== null, "readFrameMetadata returned null");
-            var bg = measureBackground(FIXTURE_DIR + fx.file, BG_X, BG_Y, meta.bitsPerSample, "G");
+            var bg = measureBackground(FIXTURE_DIR + fx.file, BG_X, BG_Y, "G");
             assertTrue(bg !== null, "measureBackground returned null");
             assertTrue(bg.adu_sky > 0, "adu_sky should be positive, got " + bg.adu_sky);
         });
@@ -49,8 +49,8 @@ for (var i = 0; i < FRAMES.length; i++) {
 test("measureBackground: ADU scales linearly with exptime (8s / 1s ≈ 8)", function() {
     var meta1 = readFrameMetadata(FIXTURE_DIR + FRAMES[0].file);
     var meta8 = readFrameMetadata(FIXTURE_DIR + FRAMES[4].file);
-    var bg1 = measureBackground(FIXTURE_DIR + FRAMES[0].file, BG_X, BG_Y, meta1.bitsPerSample, "G");
-    var bg8 = measureBackground(FIXTURE_DIR + FRAMES[4].file, BG_X, BG_Y, meta8.bitsPerSample, "G");
+    var bg1 = measureBackground(FIXTURE_DIR + FRAMES[0].file, BG_X, BG_Y, "G");
+    var bg8 = measureBackground(FIXTURE_DIR + FRAMES[4].file, BG_X, BG_Y, "G");
     assertTrue(bg1 !== null && bg8 !== null, "measureBackground returned null");
     var ratio = bg8.adu_sky / bg1.adu_sky;
     log("  bg1=" + bg1.adu_sky.toFixed(1) + "  bg8=" + bg8.adu_sky.toFixed(1) + "  ratio=" + ratio.toFixed(2));
@@ -65,7 +65,7 @@ test("computeLSky: R² > 0.99 with 6 Kochab frames", function() {
     for (var i = 0; i < FRAMES.length; i++) {
         var meta = readFrameMetadata(FIXTURE_DIR + FRAMES[i].file);
         assertTrue(meta !== null, "readFrameMetadata returned null for frame " + i);
-        var bg = measureBackground(FIXTURE_DIR + FRAMES[i].file, BG_X, BG_Y, meta.bitsPerSample, "G");
+        var bg = measureBackground(FIXTURE_DIR + FRAMES[i].file, BG_X, BG_Y, "G");
         assertTrue(bg !== null, "measureBackground returned null for frame " + i);
         skyFrames.push({ exptime: meta.exptime, adu_sky: bg.adu_sky });
     }

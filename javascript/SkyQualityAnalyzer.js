@@ -95,8 +95,10 @@ function getFITSKeyword(keywords, name) {
 }
 
 // Read frame metadata from a FITS file without keeping it open.
-// Returns { filepath, exptime, instrume, gain, isColor, bitsPerSample, hasWcs }
-// or null on error.
+// Returns { filepath, filename, exptime, instrume, gain, isColor, isReal,
+// bitsPerSample, hasWcs, isCfa } or null on error.
+// A raw CFA frame (not debayered) is returned with isCfa = true and the other
+// fields unchecked: the caller must reject it.
 function readFrameMetadata(filepath) {
    var wins = ImageWindow.open(filepath);
    if (!wins || wins.length === 0) return null;
@@ -113,12 +115,28 @@ function readFrameMetadata(filepath) {
    var gain     = gainStr ? parseInt(gainStr) : NaN;
 
    var isColor       = (image.numberOfChannels >= 3);
+   var isReal        = (image.isReal === true);
    var bitsPerSample = image.bitsPerSample;
+
+   // Bayer pattern keyword. Debayered images can keep it, so isCfaFrame() also
+   // looks at the channel count.
+   var bayerPattern = "";
+   var bayerNames = ["BAYERPAT", "BAYERPATTERN"];
+   for (var bi = 0; bi < bayerNames.length && bayerPattern === ""; bi++) {
+      var bv = getFITSKeyword(kws, bayerNames[bi]);
+      if (bv) bayerPattern = bv.replace(/^'|'$/g, "").trim();
+   }
+   var isCfa = isCfaFrame(image.numberOfChannels, bayerPattern);
 
    // Native astrometric solution check (WBPP attaches one to solved frames).
    var hasWcs = (win.hasAstrometricSolution === true);
 
    win.close();
+
+   if (isCfa) {
+      console.warningln("CFA (not debayered) frame: " + File.extractName(filepath));
+      return { filepath: filepath, filename: File.extractName(filepath), isCfa: true };
+   }
 
    if (hasWcs) {
       console.writeln("  Astrometric solution: present");
@@ -136,8 +154,10 @@ function readFrameMetadata(filepath) {
       instrume:      instrume,
       gain:          gain,
       isColor:       isColor,
+      isReal:        isReal,
       bitsPerSample: bitsPerSample,
-      hasWcs:        hasWcs
+      hasWcs:        hasWcs,
+      isCfa:         false
    };
 }
 
@@ -958,7 +978,7 @@ constructor(parent, title, filepath, mode, aperture, pixelScale) {
 // Opens the file, extracts the ROI, returns { adu_sky, count }
 //============================================================================
 
-function measureBackground(filepath, bgX, bgY, bitsPerSample, sqmChannel) {
+function measureBackground(filepath, bgX, bgY, sqmChannel) {
    var wins = ImageWindow.open(filepath);
    if (!wins || wins.length === 0) return null;
    var win   = wins[0];
@@ -966,7 +986,8 @@ function measureBackground(filepath, bgX, bgY, bitsPerSample, sqmChannel) {
 
    var isColor = (image.numberOfChannels >= 3);
    var ch      = (isColor && sqmChannel === "G") ? 1 : 0;
-   var maxADU  = (bitsPerSample === 32) ? 4294967295 : 65535;
+   // Scale from the opened image itself: floating-point images count as 16-bit equivalent.
+   var maxADU  = maxADUFor(image.isReal, image.bitsPerSample);
 
    var x0 = Math.max(0, bgX - BG_HALF);
    var y0 = Math.max(0, bgY - BG_HALF);
@@ -1012,7 +1033,7 @@ function measureBackground(filepath, bgX, bgY, bitsPerSample, sqmChannel) {
 // convention — the 0.5 px offset is negligible against a 15 px aperture).
 //============================================================================
 
-function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqmChannel, starRaDec) {
+function aperturePhotometry(filepath, starX, starY, aperture, sqmChannel, starRaDec) {
    var wins = ImageWindow.open(filepath);
    if (!wins || wins.length === 0) return null;
    var win = wins[0];
@@ -1036,7 +1057,7 @@ function aperturePhotometry(filepath, starX, starY, aperture, bitsPerSample, sqm
 
       var isColor  = (image.numberOfChannels >= 3);
       var ch       = (isColor && sqmChannel === "G") ? 1 : 0;
-      var maxADU   = (bitsPerSample === 32) ? 4294967295 : 65535;
+      var maxADU   = maxADUFor(image.isReal, image.bitsPerSample);
       var satLimit = SAT_THRESHOLD * maxADU;
 
       var r_ap  = aperture;
@@ -1119,11 +1140,11 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
 
    var pixelScale    = computePixelScale(cameraEntry.pixel_pitch, telescopeEntry.focal_length, 1);
    var sqmChannel    = cameraEntry.sqm_channel || "G";
-   var bitsPerSample = frames[0].bitsPerSample;
 
    var skyFrameData  = [];
    var starFrameData = [];
    var frameResults  = [];  // per-frame data for UI display
+   var measuredFrames = []; // frames that actually went into this result (for CSV export)
 
    for (var i = 0; i < frames.length; i++) {
       var f  = frames[i];
@@ -1132,10 +1153,10 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
          console.writeln("  [WARN] No astrometric solution for " + f.filename + " — using fixed star coords");
       }
 
-      var bg = measureBackground(f.filepath, bgX, bgY, bitsPerSample, sqmChannel);
+      var bg = measureBackground(f.filepath, bgX, bgY, sqmChannel);
       // aperturePhotometry projects starRaDec onto this frame via its own WCS
       // when available, falling back to (starX, starY) otherwise.
-      var ap = aperturePhotometry(f.filepath, starX, starY, aperture, bitsPerSample, sqmChannel, starRaDec);
+      var ap = aperturePhotometry(f.filepath, starX, starY, aperture, sqmChannel, starRaDec);
 
       if (!bg || !ap) {
          console.warningln("Skipping frame (measurement failed): " + f.filename);
@@ -1146,6 +1167,7 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%% (%d px)  starXY=(%.1f,%.1f)",
          f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, ap.saturated_pixels || 0, ap.starX, ap.starY));
 
+      measuredFrames.push({ filename: f.filename, exptime: f.exptime });
       skyFrameData.push({ exptime: f.exptime, adu_sky: bg.adu_sky });
       starFrameData.push({
          exptime:             f.exptime,
@@ -1167,7 +1189,7 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    var lStarResult = computeLStar(starFrameData);
    var lPrimeSky   = computeLPrimeSky(lSkyResult.L_sky, pixelScale);
    var sqm         = computeSQM(lStarResult.L_star, lPrimeSky, vmag);
-   var label       = skyConditionLabel(sqm);
+   var label       = skyConditionLabel(sqm);  // null when sqm is not finite
 
    // Tag each frame as used (no saturated pixels in the aperture) or excluded.
    // Uses the same threshold as computeLStar()'s own exclusion criterion
@@ -1211,7 +1233,27 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       }
    }
 
+   // Why no SQM came out (null when it did). Uses the frames that were in the star fit.
+   var usedExptimes = [];
+   for (var k = 0; k < frameResults.length; k++) {
+      if (frameResults[k].used) usedExptimes.push(frameResults[k].exptime);
+   }
+   // Only explain a missing SQM: exposures closer than 1 ms can still give a
+   // (barely) solvable fit, and a reason next to a value would contradict it.
+   var failureReason = isFinite(sqm) ? null : sqmFailureReason({
+      nUsedStarFrames:   usedExptimes.length,
+      L_star:            lStarResult.L_star,
+      L_sky:             lSkyResult.L_sky,
+      L_prime_sky:       lPrimeSky,
+      distinctExposures: countDistinctExposures(usedExptimes)
+   });
+   if (!isFinite(sqm) && failureReason === null) {
+      failureReason = "The SQM value could not be computed from these measurements.";
+   }
+
    return {
+      failure_reason:   failureReason,
+      frames:           measuredFrames,
       L_sky:            lSkyResult.L_sky,
       r2_sky:           lSkyResult.r2,
       L_star:           lStarResult.L_star,
@@ -1234,11 +1276,20 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    };
 }
 
+// Format a number for display, or an em dash when it is not finite
+// (a failed fit must not show up as "NaN" next to real-looking units).
+function fixedOrDash(value, digits) {
+   return (typeof value === "number" && isFinite(value)) ? value.toFixed(digits) : "\u2014";
+}
+
 //============================================================================
 // CSV export
 //============================================================================
 
-function exportCSV(result, frames, outputPath) {
+// Writes the frames that produced `result` (result.frames), never the current
+// frame list of the dialog. Only call it with a finite result.sqm.
+function exportCSV(result, outputPath) {
+   var frames = result.frames;
    var lines = [];
    lines.push("# Sky Quality Analyzer v" + VERSION);
    lines.push("# Generated: " + (new Date()).toISOString());
@@ -1343,6 +1394,7 @@ constructor() {
       if (!od.execute()) return;
 
       var added = 0;
+      var cfaSkipped = 0;
       for (var i = 0; i < od.filePaths.length; i++) {
          var fp = od.filePaths[i];
          // Skip duplicates
@@ -1355,7 +1407,10 @@ constructor() {
          console.writeln("Reading: " + File.extractName(fp));
          console.flush();
          var meta = readFrameMetadata(fp);
-         if (meta) {
+         if (meta && meta.isCfa) {
+            cfaSkipped++;
+            console.warningln("  \u2192 Skipped (CFA frame, not debayered)");
+         } else if (meta) {
             self.frames.push(meta);
             added++;
          } else {
@@ -1363,7 +1418,7 @@ constructor() {
          }
       }
 
-      self.refreshFrameTree();
+      if (added > 0) self.invalidateResults();
 
       // Auto-detect camera from first frame's INSTRUME header
       if (added > 0 && self.frames.length > 0) {
@@ -1377,6 +1432,14 @@ constructor() {
                }
             }
          }
+      }
+
+      if (cfaSkipped > 0) {
+         var cfaBox = new MessageBox(
+            cfaSkipped + " frame(s) were not added because they are CFA (not debayered) images.\n"
+            + "Debayer them first, then add them again.",
+            TITLE, StdIcon.Warning, StdButton.Ok);
+         cfaBox.execute();
       }
    };
 
@@ -1395,7 +1458,7 @@ constructor() {
       for (var i = 0; i < indices.length; i++) {
          self.frames.splice(indices[i], 1);
       }
-      self.refreshFrameTree();
+      self.invalidateResults();
    };
 
    var clearFramesBtn = new PushButton(framesGroupBox);
@@ -1403,7 +1466,7 @@ constructor() {
    clearFramesBtn.toolTip = "Remove all frames from the list";
    clearFramesBtn.onClick = function() {
       self.frames = [];
-      self.refreshFrameTree();
+      self.invalidateResults();
    };
 
    var frameBtnSizer = new HorizontalSizer;
@@ -1435,7 +1498,7 @@ constructor() {
    for (var i = 0; i < gEquipment.cameras.length; i++) {
       this.cameraCombo.addItem(gEquipment.cameras[i].name);
    }
-   this.cameraCombo.onItemSelected = function() { self.updatePixelScale(); };
+   this.cameraCombo.onItemSelected = function() { self.updatePixelScale(); self.invalidateResults(); };
 
    var camRow = new HorizontalSizer;
    camRow.spacing = 6;
@@ -1452,7 +1515,7 @@ constructor() {
    for (var i = 0; i < gEquipment.telescopes.length; i++) {
       this.teleCombo.addItem(gEquipment.telescopes[i].name);
    }
-   this.teleCombo.onItemSelected = function() { self.updatePixelScale(); };
+   this.teleCombo.onItemSelected = function() { self.updatePixelScale(); self.invalidateResults(); };
 
    var teleRow = new HorizontalSizer;
    teleRow.spacing = 6;
@@ -1512,7 +1575,7 @@ constructor() {
             self.bgX = dlg.selectedX;
             self.bgY = dlg.selectedY;
             self.bgPosLabel.text = "X=" + self.bgX + "  Y=" + self.bgY + "  (64×64 px region)";
-            self.updateUI();
+            self.invalidateResults();
          }
       } finally {
          if (dlg) dlg.releaseImage();
@@ -1546,16 +1609,7 @@ constructor() {
       }
       var ap = self.apertureSpinBox.value;
       // Compute current pixel scale from selected equipment for NearbyStarDialog suitability column.
-      var currentPs = 0;
-      var ci = self.cameraCombo.currentItem;
-      var ti = self.teleCombo.currentItem;
-      if (ci >= 0 && ti >= 0 && ci < gEquipment.cameras.length && ti < gEquipment.telescopes.length) {
-         var camE  = gEquipment.cameras[ci];
-         var teleE = gEquipment.telescopes[ti];
-         if (camE.pixel_pitch > 0 && teleE.focal_length > 0) {
-            currentPs = computePixelScale(camE.pixel_pitch, teleE.focal_length, 1);
-         }
-      }
+      var currentPs = self.currentPixelScale();
       // Use longest-exposure frame with an astrometric solution (best SNR for star
       // identification). Fall back to longest-exposure frame without one if none are solved.
       var previewFrame = null;
@@ -1580,13 +1634,19 @@ constructor() {
             self.starY     = dlg.selectedY;
             self.starRaDec = dlg.selectedRaDec || null;
             self.starPosDisplay.text = "X=" + self.starX.toFixed(2) + "  Y=" + self.starY.toFixed(2);
-            // Auto-fill name and V mag if a catalog star was identified
             if (dlg.selectedStar) {
+               // Auto-fill name and V mag: a catalog star was identified in the dialog
                self.starNameEdit.text = dlg.selectedStar.id;
                self.vmagEdit.text     = dlg.selectedStar.vmag.toFixed(3);
                self.vmag              = dlg.selectedStar.vmag;
+            } else {
+               // A new position without a catalog star: the old name and magnitude
+               // belong to another position, so clear them.
+               self.starNameEdit.text = "";
+               self.vmagEdit.text     = "";
+               self.vmag              = NaN;
             }
-            self.updateUI();
+            self.invalidateResults();
          }
       } finally {
          if (dlg) dlg.releaseImage();
@@ -1610,6 +1670,7 @@ constructor() {
    this.apertureSpinBox.maxValue = 100;
    this.apertureSpinBox.value    = 15;
    this.apertureSpinBox.toolTip  = "Aperture radius in pixels. Increase for defocused stars.";
+   this.apertureSpinBox.onValueUpdated = function(value) { self.invalidateResults(); };
 
    var apUnitLabel = new Label(measureGroupBox);
    apUnitLabel.text = "px  (sky annulus: r+5 to r+25)";
@@ -1664,6 +1725,7 @@ constructor() {
          if (info.vmag !== null) {
             self.vmagEdit.text = info.vmag.toFixed(3);
             self.vmag = info.vmag;
+            self.invalidateResults();
          } else {
             var mb = new MessageBox(
                "'" + name + "' found but no V magnitude in catalog.\n"
@@ -1671,6 +1733,7 @@ constructor() {
                TITLE, StdIcon.Warning, StdButton.Ok);
             mb.execute();
          }
+         self.checkSesamePosition(name, info, info.vmag !== null);
       } else {
          var mb = new MessageBox(
             "'" + name + "' not found.\nPlease enter V magnitude manually.",
@@ -1695,7 +1758,7 @@ constructor() {
    this.vmagEdit.onTextUpdated = function(text) {
       var v = parseFloat(text);
       self.vmag = isNaN(v) ? NaN : v;
-      self.updateUI();
+      self.invalidateResults();
    };
 
    var vmagHint = new Label(starGroupBox);
@@ -1722,6 +1785,11 @@ constructor() {
    this.analyzeBtn.onClick = function() {
       self.runAnalysis();
    };
+
+   // One line saying what is still missing before Analyze can be pressed.
+   this.analyzeStatusLabel = new Label(this);
+   this.analyzeStatusLabel.textAlignment = TextAlignment.Center | TextAlignment.VertCenter;
+   this.analyzeStatusLabel.text = "";
 
    var analyzeSizer = new HorizontalSizer;
    analyzeSizer.addStretch();
@@ -1771,14 +1839,14 @@ constructor() {
    this.exportCSVBtn.toolTip = "Export analysis results to CSV file";
    this.exportCSVBtn.enabled = false;
    this.exportCSVBtn.onClick = function() {
-      if (!self.sqmResult) return;
+      if (!self.sqmResult || !isFinite(self.sqmResult.sqm)) return;
       var sd = new SaveFileDialog;
       sd.caption      = "Save Results as CSV";
       sd.filters      = [["CSV Files", "*.csv"]];
       sd.initialPath  = "sqm_result.csv";
       if (!sd.execute()) return;
       try {
-         exportCSV(self.sqmResult, self.frames, sd.filePath);
+         exportCSV(self.sqmResult, sd.filePath);
          console.writeln("Results exported: " + sd.filePath);
          var mb = new MessageBox("Exported:\n" + sd.filePath, TITLE, StdIcon.NoIcon, StdButton.Ok);
          mb.execute();
@@ -1819,6 +1887,7 @@ constructor() {
    this.sizer.add(measureGroupBox);
    this.sizer.add(starGroupBox);
    this.sizer.add(analyzeSizer);
+   this.sizer.add(this.analyzeStatusLabel);
    this.sizer.add(resultsGroupBox);
    this.sizer.add(closeSizer);
 
@@ -1881,7 +1950,67 @@ constructor() {
    this.starGroupBox.title = "4. Reference Star Magnitude"
       + "  [V mag " + (vmagOk ? "\u2713" : "\u2717") + "]";
 
-   this.analyzeBtn.enabled = (nf >= 2 && bgOk && starOk && vmagOk);
+   var exptimes = [];
+   for (var i = 0; i < nf; i++) exptimes.push(this.frames[i].exptime);
+   var exposuresOk = (countDistinctExposures(exptimes) >= 2);
+
+   // What still blocks Analyze, in the order the operator works through the dialog.
+   var missing = [];
+   if (!exposuresOk)  missing.push("Add frames with at least 2 different exposure times");
+   if (!bgOk)         missing.push("Select a background region");
+   if (!starOk)       missing.push("Select the reference star");
+   if (!vmagOk)       missing.push("Enter the V magnitude");
+   // Same condition as the check at the start of runAnalysis(): "Custom" entries
+   // in equipment.json have pixel_pitch / focal_length = 0.
+   if (!(this.currentPixelScale() > 0))
+      missing.push("Select a camera and telescope with a known pixel size and focal length");
+   this.analyzeStatusLabel.text = (missing.length > 0) ? missing.join("  /  ") : "Ready";
+
+   this.analyzeBtn.enabled = (missing.length === 0);
+   }
+
+   // Pixel scale [arcsec/px] of the selected camera and telescope, or 0 if unknown.
+   currentPixelScale() {
+   var ci = this.cameraCombo.currentItem;
+   var ti = this.teleCombo.currentItem;
+   if (ci >= 0 && ti >= 0 && ci < gEquipment.cameras.length && ti < gEquipment.telescopes.length) {
+      var camE  = gEquipment.cameras[ci];
+      var teleE = gEquipment.telescopes[ti];
+      if (camE.pixel_pitch > 0 && teleE.focal_length > 0) {
+         return computePixelScale(camE.pixel_pitch, teleE.focal_length, 1);
+      }
+   }
+   return 0;
+   }
+
+   // Warn when the position Sesame returns for `name` is far from the clicked
+   // star position: the V magnitude may then belong to a different star.
+   checkSesamePosition(name, info, vmagFilled) {
+   if (!this.starRaDec) return;
+   if (info.ra === null || info.dec === null) return;
+   var sep = angularSeparationArcsec(this.starRaDec.ra, this.starRaDec.dec, info.ra, info.dec);
+   var ps  = this.currentPixelScale();
+   var limit = 120;
+   if (ps > 0) limit = Math.max(120, 2 * this.apertureSpinBox.value * ps);
+   console.writeln("  Sesame position is " + sep.toFixed(1) + " arcsec from the selected star (limit "
+      + limit.toFixed(0) + " arcsec)");
+   if (sep > limit) {
+      var mb = new MessageBox(
+         "'" + name + "' is " + (sep / 60).toFixed(1) + " arcmin away from the star position you selected.\n"
+         + (vmagFilled
+            ? "The V magnitude was filled in, but it may belong to a different star.\n"
+            : "It may be a different object from the star you clicked.\n")
+         + "Please check that the star name matches the star you clicked.",
+         TITLE, StdIcon.Warning, StdButton.Ok);
+      mb.execute();
+   }
+   }
+
+   // Any input to the analysis changed: drop the result so an old value never
+   // stays next to new inputs (this also clears Flux/Sat%/Status in the frame list).
+   invalidateResults() {
+   this.clearResults();
+   this.refreshFrameTree();
    }
 
    updatePixelScale() {
@@ -1920,6 +2049,14 @@ constructor() {
    // Validation
    if (this.frames.length < 2) {
       var mb = new MessageBox("Please add at least 2 frames.", TITLE, StdIcon.Warning, StdButton.Ok);
+      mb.execute();
+      return;
+   }
+   var expList = [];
+   for (var ei = 0; ei < this.frames.length; ei++) expList.push(this.frames[ei].exptime);
+   if (countDistinctExposures(expList) < 2) {
+      var mb = new MessageBox("Please add frames with at least 2 different exposure times.",
+         TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
    }
@@ -1988,7 +2125,7 @@ constructor() {
             + "Check that EXPTIME is in FITS headers and the ROI/star positions are within the image.",
             TITLE, StdIcon.Error, StdButton.Ok);
          mb.execute();
-         this.analyzeBtn.enabled = true;
+         this.updateUI();
          return;
       }
 
@@ -2000,7 +2137,11 @@ constructor() {
       console.writeln("  L_star       = " + result.L_star.toFixed(1) + " counts/s     (R²=" + result.r2_star.toFixed(5) + ")");
       console.writeln("  Pixel Scale  = " + result.pixel_scale.toFixed(3) + " arcsec/px");
       console.writeln("  L'_sky       = " + result.L_prime_sky.toFixed(6) + " counts/s/arcsec²");
-      console.writeln("  <b>SQM = " + result.sqm.toFixed(3) + " mag/arcsec²  → " + result.label + "</b>");
+      if (result.label !== null) {
+         console.writeln("  <b>SQM = " + result.sqm.toFixed(3) + " mag/arcsec²  → " + result.label + "</b>");
+      } else {
+         console.warningln("  SQM could not be computed: " + result.failure_reason);
+      }
 
       if (result.r2_sky < 0.99) {
          console.warningln("  WARNING: R²_sky=" + result.r2_sky.toFixed(4) + " is low. Check background ROI for stars.");
@@ -2016,12 +2157,14 @@ constructor() {
          ? ("  (" + nUsed + " used / " + nExcluded + " excluded \u2014 saturation)")
          : ("  (" + nUsed + " frames)");
 
-      this.resultSQMLabel.text = "SQM:             " + result.sqm.toFixed(3) + " mag/arcsec\u00b2";
-      this.resultConditionLabel.text = "Sky Condition:   " + result.label;
-      this.resultLSkyLabel.text  = "L_sky:           " + result.L_sky.toFixed(4)
-         + " counts/s/px  (R\u00b2=" + result.r2_sky.toFixed(4) + ")";
-      this.resultLStarLabel.text = "L_star:          " + result.L_star.toFixed(1)
-         + " counts/s  (R\u00b2=" + result.r2_star.toFixed(4) + ")" + excludedStr;
+      var dash = "\u2014";
+      this.resultSQMLabel.text = "SQM:             "
+         + (result.label !== null ? result.sqm.toFixed(3) + " mag/arcsec\u00b2" : dash);
+      this.resultConditionLabel.text = "Sky Condition:   " + (result.label !== null ? result.label : dash);
+      this.resultLSkyLabel.text  = "L_sky:           " + fixedOrDash(result.L_sky, 4)
+         + " counts/s/px  (R\u00b2=" + fixedOrDash(result.r2_sky, 4) + ")";
+      this.resultLStarLabel.text = "L_star:          " + fixedOrDash(result.L_star, 1)
+         + " counts/s  (R\u00b2=" + fixedOrDash(result.r2_star, 4) + ")" + excludedStr;
       this.resultPixScaleLabel.text = "Pixel Scale:     " + result.pixel_scale.toFixed(3) + " arcsec/px";
       this.resultNFramesLabel.text  = "Frames:          " + result.n_frames + " measured"
          + (nExcluded > 0 ? ",  " + nUsed + " used for L_star  (" + nExcluded + " sat excluded)" : "");
@@ -2029,8 +2172,7 @@ constructor() {
       var warnings = [];
       if (result.r2_sky  < 0.99) warnings.push("R\u00b2_sky="  + result.r2_sky.toFixed(3)  + " is low \u2014 check background ROI for stars.");
       if (result.r2_star < 0.99) warnings.push("R\u00b2_star=" + result.r2_star.toFixed(3) + " is low \u2014 check star position and aperture.");
-      if (isNaN(result.sqm) && nUsed < 2)
-         warnings.push("Only " + nUsed + " frame(s) without saturated pixels \u2014 shorten exposure or defocus more.");
+      if (result.failure_reason) warnings.push(result.failure_reason);
       if (result.nonlinear_frames && result.nonlinear_frames.length > 0)
          warnings.push("Non-linear rate (not excluded): " + result.nonlinear_frames.join(", "));
       this.resultWarningLabel.text = warnings.length > 0 ? "WARNING: " + warnings.join("  /  ") : "";
@@ -2038,14 +2180,14 @@ constructor() {
       // Refresh frame list with analysis status (Flux, Sat%, Status columns)
       this.refreshFrameTree(result.frameData);
 
-      this.exportCSVBtn.enabled = true;
+      this.exportCSVBtn.enabled = (result.label !== null);
 
    } catch (e) {
       var mb = new MessageBox("Unexpected error:\n" + e, TITLE, StdIcon.Error, StdButton.Ok);
       mb.execute();
    }
 
-   this.analyzeBtn.enabled = true;
+   this.updateUI();
    }
 };
 

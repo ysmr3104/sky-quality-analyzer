@@ -42,10 +42,10 @@ test("aperturePhotometry: flux changes <= 2% for a 0.3 px center shift", functio
     }
     log("  star center (integer) = (" + center.x + ", " + center.y + ")");
 
-    var apInt = aperturePhotometry(FRAME_10S, center.x, center.y, APERTURE, meta.bitsPerSample, "G", null);
+    var apInt = aperturePhotometry(FRAME_10S, center.x, center.y, APERTURE, "G", null);
     assertTrue(apInt !== null, "aperturePhotometry (integer center) returned null");
 
-    var apShifted = aperturePhotometry(FRAME_10S, center.x + 0.3, center.y, APERTURE, meta.bitsPerSample, "G", null);
+    var apShifted = aperturePhotometry(FRAME_10S, center.x + 0.3, center.y, APERTURE, "G", null);
     assertTrue(apShifted !== null, "aperturePhotometry (shifted center) returned null");
 
     assertTrue(!isNaN(apInt.adu_star) && apInt.adu_star > 0, "integer-center flux should be positive");
@@ -79,7 +79,7 @@ test("aperturePhotometry: starRaDec overrides starX/starY with the WCS-projected
     var starRaDec = { ra: KOCHAB_RA, dec: KOCHAB_DEC };
     // Deliberately pass a wrong fallback center (0, 0). If starRaDec is actually
     // honored, this fallback is never used and the result still lands on the star.
-    var apViaRaDec = aperturePhotometry(FRAME_10S, 0, 0, APERTURE, meta.bitsPerSample, "G", starRaDec);
+    var apViaRaDec = aperturePhotometry(FRAME_10S, 0, 0, APERTURE, "G", starRaDec);
     assertTrue(apViaRaDec !== null, "aperturePhotometry (via starRaDec) returned null");
 
     // (a) returned starX/starY should match celestialToImage() within 0.01 px.
@@ -90,7 +90,7 @@ test("aperturePhotometry: starRaDec overrides starX/starY with the WCS-projected
     // (b) adu_star should match a direct call using that same center (no starRaDec),
     // to within a relative 1e-9 — i.e. the starRaDec path isn't computing anything
     // differently from just being handed the right coordinates.
-    var apDirect = aperturePhotometry(FRAME_10S, expectedPt.x, expectedPt.y, APERTURE, meta.bitsPerSample, "G", null);
+    var apDirect = aperturePhotometry(FRAME_10S, expectedPt.x, expectedPt.y, APERTURE, "G", null);
     assertTrue(apDirect !== null, "aperturePhotometry (direct center) returned null");
 
     var relDiff = Math.abs(apViaRaDec.adu_star - apDirect.adu_star) / Math.abs(apDirect.adu_star);
@@ -125,7 +125,7 @@ test("aperturePhotometry: saturated pixels included in flux sum (issue #13)", fu
         win.forceClose();
     }
 
-    var ap = aperturePhotometry(FRAME_10S, center.x, center.y, APERTURE, meta.bitsPerSample, "G", null);
+    var ap = aperturePhotometry(FRAME_10S, center.x, center.y, APERTURE, "G", null);
     assertTrue(ap !== null, "aperturePhotometry returned null");
     log("  saturated_pixels=" + ap.saturated_pixels
         + "  saturated_fraction=" + (ap.saturated_fraction * 100).toFixed(2) + "%"
@@ -143,7 +143,7 @@ test("aperturePhotometry: saturated pixels included in flux sum (issue #13)", fu
     assertTrue(wins2 && wins2.length > 0, "ImageWindow.open failed (2nd open)");
     var win2   = wins2[0];
     var image2 = win2.mainView.image;
-    var maxADU = (meta.bitsPerSample === 32) ? 4294967295 : 65535;
+    var maxADU = maxADUFor(image2.isReal, image2.bitsPerSample); // same scale as the production code
     var ch     = 1; // "G" channel of a color image, matching aperturePhotometry's convention
 
     var cx = ap.starX;
