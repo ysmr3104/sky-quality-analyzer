@@ -659,7 +659,7 @@ FITS ヘッダーの `XBINNING` / `YBINNING` から取得し、ピクセルス�
    - 各フレームから EXPTIME を取得
    - OSC カメラ（NAXIS3 == 3）: G チャンネルを抽出
    - PixInsight 正規化値（0〜1）→ ADU への変換
-     ADU = normalized × 65535（16bit）または normalized × 4294967295（32bit）
+     ADU = normalized × maxADU（浮動小数の画像は 16bit 相当の 65535、32bit 整数だけ 4294967295。8.3 節）
 
 3. バックグラウンド測定 → L_sky
    - ユーザーが星のない 64×64px ROI をプレビュー画像上でクリックして指定
@@ -704,12 +704,18 @@ FITS ヘッダーの `XBINNING` / `YBINNING` から取得し、ピクセルス�
 PixInsight は内部的に全画像値を 0〜1 に正規化して保持します。SQM 算出には実際の ADU 値が必要なため、以下の変換を行います。
 
 ```javascript
-// FITS ヘッダーの BITPIX または画像の bitsPerSample から bit depth を判定
-var maxADU = (image.bitsPerSample == 16) ? 65535 : 4294967295;
+// sqm_math.js の maxADUFor()。開いた画像自身の isReal と bitsPerSample で決める
+var maxADU = maxADUFor(image.isReal, image.bitsPerSample);
 var adu = image.sample(x, y, channel) * maxADU;
 ```
 
-キャリブレーション済みの 32bit float 画像では、PixInsight が FITS の BZERO/BSCALE を適用済みのため、上記の変換で正しい ADU 値が得られます。
+| 画像 | maxADU |
+|---|---|
+| 浮動小数（WBPP のキャリブレーション済み XISF など） | 65535（16bit 相当） |
+| 32bit 整数 | 4294967295 |
+| それ以外（16bit 整数など） | 65535 |
+
+**浮動小数の画像には ADU の目盛りがありません。** 正規化値（0〜1）がカメラの 16bit の範囲に対応するものとして 65535 を掛けます。以前は 32bit なら浮動小数でも 4294967295 を掛けていて、フラックスが数十億の値になっていました（#15）。**SQM は L_star と L'_sky の比なので、どちらの換算でも値は変わりません。** 飽和の閾値（0.97 × maxADU）も正規化値で 0.97 のままです。
 
 ### 8.4 開口測光の実装
 

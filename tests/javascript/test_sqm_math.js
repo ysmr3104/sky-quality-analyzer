@@ -181,7 +181,8 @@ assertClose(math.normalizedToADU(1.0, false, 32),   4294967295, 1,  "32bit int: 
 assertClose(math.normalizedToADU(1.0, true, 32),    65535,      1,  "32bit float: max = 65535 (16bit equivalent)");
 assertClose(math.normalizedToADU(0.008, true, 32),  524.28,     1,  "32bit float: 0.008 ≈ 524 ADU");
 
-// The saturation limit (0.97 of maxADU) stays 0.97 in normalized units for every format
+// normalizedToADU() scales linearly by maxADUFor(), so a 0.97-of-maxADU limit is a 0.97 normalized limit for every format
+// (aperturePhotometry compares sample*maxADU with SAT_THRESHOLD*maxADU; this only checks the linearity)
 var satOk = true;
 var fmts = [[true, 32], [false, 32], [false, 16], [true, 16]];
 for (var fi = 0; fi < fmts.length; fi++) {
@@ -190,7 +191,7 @@ for (var fi = 0; fi < fmts.length; fi++) {
     if (!(math.normalizedToADU(0.97, fmts[fi][0], fmts[fi][1]) >= lim)) satOk = false;
     if (math.normalizedToADU(0.969, fmts[fi][0], fmts[fi][1]) >= lim) satOk = false;
 }
-assert(satOk, "saturation limit is 0.97 in normalized units for all formats");
+assert(satOk, "normalizedToADU is linear in maxADUFor for all formats");
 
 // ============================================================
 // maxADUFor

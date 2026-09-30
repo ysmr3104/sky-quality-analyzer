@@ -1238,7 +1238,9 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    for (var k = 0; k < frameResults.length; k++) {
       if (frameResults[k].used) usedExptimes.push(frameResults[k].exptime);
    }
-   var failureReason = sqmFailureReason({
+   // Only explain a missing SQM: exposures closer than 1 ms can still give a
+   // (barely) solvable fit, and a reason next to a value would contradict it.
+   var failureReason = isFinite(sqm) ? null : sqmFailureReason({
       nUsedStarFrames:   usedExptimes.length,
       L_star:            lStarResult.L_star,
       L_sky:             lSkyResult.L_sky,
@@ -1416,7 +1418,7 @@ constructor() {
          }
       }
 
-      self.invalidateResults();
+      if (added > 0) self.invalidateResults();
 
       // Auto-detect camera from first frame's INSTRUME header
       if (added > 0 && self.frames.length > 0) {
@@ -1731,7 +1733,7 @@ constructor() {
                TITLE, StdIcon.Warning, StdButton.Ok);
             mb.execute();
          }
-         self.checkSesamePosition(name, info);
+         self.checkSesamePosition(name, info, info.vmag !== null);
       } else {
          var mb = new MessageBox(
             "'" + name + "' not found.\nPlease enter V magnitude manually.",
@@ -1958,6 +1960,10 @@ constructor() {
    if (!bgOk)         missing.push("Select a background region");
    if (!starOk)       missing.push("Select the reference star");
    if (!vmagOk)       missing.push("Enter the V magnitude");
+   // Same condition as the check at the start of runAnalysis(): "Custom" entries
+   // in equipment.json have pixel_pitch / focal_length = 0.
+   if (!(this.currentPixelScale() > 0))
+      missing.push("Select a camera and telescope with a known pixel size and focal length");
    this.analyzeStatusLabel.text = (missing.length > 0) ? missing.join("  /  ") : "Ready";
 
    this.analyzeBtn.enabled = (missing.length === 0);
@@ -1979,7 +1985,7 @@ constructor() {
 
    // Warn when the position Sesame returns for `name` is far from the clicked
    // star position: the V magnitude may then belong to a different star.
-   checkSesamePosition(name, info) {
+   checkSesamePosition(name, info, vmagFilled) {
    if (!this.starRaDec) return;
    if (info.ra === null || info.dec === null) return;
    var sep = angularSeparationArcsec(this.starRaDec.ra, this.starRaDec.dec, info.ra, info.dec);
@@ -1991,7 +1997,9 @@ constructor() {
    if (sep > limit) {
       var mb = new MessageBox(
          "'" + name + "' is " + (sep / 60).toFixed(1) + " arcmin away from the star position you selected.\n"
-         + "The V magnitude was filled in, but it may belong to a different star.\n"
+         + (vmagFilled
+            ? "The V magnitude was filled in, but it may belong to a different star.\n"
+            : "It may be a different object from the star you clicked.\n")
          + "Please check that the star name matches the star you clicked.",
          TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
