@@ -1011,6 +1011,100 @@ function measureBackground(filepath, bgX, bgY, sqmChannel) {
 }
 
 //============================================================================
+// Star center refinement (issue #22)
+// The projected (plate solution) or clicked position can be off by several
+// pixels — solution error, a hand that wobbled, a fixture that was flipped.
+// Whatever the cause, re-centroid on the star before measuring it.
+// Returns { x, y, refined, shift, reason }
+// - refined: false when no star was found or the center would have moved too
+//   far (probably a different star); x/y are then the input position.
+// - shift: distance from the input position [px].
+// - reason: why it was not refined (English, for the operator), else null.
+// Saturated stars are fine: the flat-topped core is symmetric.
+//============================================================================
+
+function refineStarCenter(image, ch, cx, cy, aperture) {
+   var r_in  = aperture + 5;
+   var r_out = aperture + 25;
+   var x0 = cx;
+   var y0 = cy;
+   var curX = cx;
+   var curY = cy;
+   var found = false;
+   var lastReason = null;
+
+   for (var iter = 0; iter < CENTROID_MAX_ITER; iter++) {
+      // Sky around the current center (mean and std, sigma-clipped)
+      var sky = [];
+      var xLo = Math.floor(curX - r_out) - 1;
+      var xHi = Math.ceil(curX + r_out) + 1;
+      var yLo = Math.floor(curY - r_out) - 1;
+      var yHi = Math.ceil(curY + r_out) + 1;
+      for (var y = yLo; y <= yHi; y++) {
+         if (y < 0 || y >= image.height) continue;
+         for (var x = xLo; x <= xHi; x++) {
+            if (x < 0 || x >= image.width) continue;
+            var dx = x + 0.5 - curX;
+            var dy = y + 0.5 - curY;
+            var d = Math.sqrt(dx * dx + dy * dy);
+            if (d >= r_in && d <= r_out) sky.push(image.sample(x, y, ch));
+         }
+      }
+      if (sky.length < 10) {
+         lastReason = "The selected position is too close to the image edge to measure the sky.";
+         break;
+      }
+      var st = sigmaClippingStats(sky, 3.0, 10);
+
+      // Pixels inside the aperture
+      var pix = [];
+      xLo = Math.floor(curX - aperture) - 1;
+      xHi = Math.ceil(curX + aperture) + 1;
+      yLo = Math.floor(curY - aperture) - 1;
+      yHi = Math.ceil(curY + aperture) + 1;
+      for (var y2 = yLo; y2 <= yHi; y2++) {
+         if (y2 < 0 || y2 >= image.height) continue;
+         for (var x2 = xLo; x2 <= xHi; x2++) {
+            if (x2 < 0 || x2 >= image.width) continue;
+            var ex = x2 + 0.5 - curX;
+            var ey = y2 + 0.5 - curY;
+            if (ex * ex + ey * ey <= aperture * aperture) {
+               pix.push({ x: x2 + 0.5, y: y2 + 0.5, v: image.sample(x2, y2, ch) });
+            }
+         }
+      }
+
+      var c = significantPixelCentroid(pix, st.mean, st.std);
+      if (!c.ok) {
+         lastReason = c.reason;
+         break;
+      }
+      var mdx = c.x - x0;
+      var mdy = c.y - y0;
+      if (Math.sqrt(mdx * mdx + mdy * mdy) > aperture * CENTROID_MAX_SHIFT_FRAC) {
+         found = false;
+         lastReason = "The star found near the selected position is more than "
+            + (aperture * CENTROID_MAX_SHIFT_FRAC).toFixed(1)
+            + " px away — it may be a different star, so the position was not corrected.";
+         break;
+      }
+      var step = Math.sqrt((c.x - curX) * (c.x - curX) + (c.y - curY) * (c.y - curY));
+      curX = c.x;
+      curY = c.y;
+      found = true;
+      lastReason = null;
+      if (step < CENTROID_CONVERGE_PX) break;
+   }
+
+   if (!found) {
+      return { x: x0, y: y0, refined: false, shift: 0, reason: lastReason };
+   }
+   var sx = curX - x0;
+   var sy = curY - y0;
+   return { x: curX, y: curY, refined: true, shift: Math.sqrt(sx * sx + sy * sy), reason: null };
+}
+
+//============================================================================
 // Aperture photometry
 // Returns { adu_star, saturated_fraction, saturated_pixels, starX, starY, skyBg }
 // - adu_star: net star flux (full aperture sum minus sky background), i.e.
@@ -1024,9 +1118,13 @@ function measureBackground(filepath, bgX, bgY, sqmChannel) {
 // - skyBg: the sky background estimate (SExtractor mode) used for the subtraction,
 //   returned so callers/tests can verify adu_star independently without
 //   recomputing the annulus statistics.
-// - starX/starY: the fractional center actually used for this frame — the
-//   WCS-projected position (via celestialToImage) when starRaDec is given and
-//   this frame has an astrometric solution, otherwise the starX/starY passed in.
+// - projectedX/projectedY: the position before re-centering — the WCS-projected
+//   position (via celestialToImage) when starRaDec is given and this frame has
+//   an astrometric solution, otherwise the starX/starY passed in.
+// - starX/starY: the fractional center actually measured — projectedX/Y moved
+//   to the star's centroid by refineStarCenter() when a star was found there.
+// - centroidRefined / centroidShift / centroidReason: outcome of that
+//   re-centering (shift in px; reason is set when it was not done).
 //
 // Center/distance convention: pixel (ix, iy) is treated as covering
 // [ix, ix+1) x [iy, iy+1), i.e. its center is (ix+0.5, iy+0.5) (assumed PCL
@@ -1059,6 +1157,15 @@ function aperturePhotometry(filepath, starX, starY, aperture, sqmChannel, starRa
       var ch       = (isColor && sqmChannel === "G") ? 1 : 0;
       var maxADU   = maxADUFor(image.isReal, image.bitsPerSample);
       var satLimit = SAT_THRESHOLD * maxADU;
+
+      // Re-centroid on the star around the projected/clicked position.
+      var projectedX = cx;
+      var projectedY = cy;
+      var refine = refineStarCenter(image, ch, cx, cy, aperture);
+      if (refine.refined) {
+         cx = refine.x;
+         cy = refine.y;
+      }
 
       var r_ap  = aperture;
       var r_in  = aperture + 5;
@@ -1121,8 +1228,13 @@ function aperturePhotometry(filepath, starX, starY, aperture, sqmChannel, starRa
          adu_star:            netFlux,
          saturated_fraction:  saturated_fraction,
          saturated_pixels:    satCount,
+         projectedX:          projectedX,
+         projectedY:          projectedY,
          starX:               cx,
          starY:               cy,
+         centroidShift:       refine.shift,
+         centroidRefined:     refine.refined,
+         centroidReason:      refine.reason,
          skyBg:               skyBg
       };
    } finally {
@@ -1145,6 +1257,8 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    var starFrameData = [];
    var frameResults  = [];  // per-frame data for UI display
    var measuredFrames = []; // frames that actually went into this result (for CSV export)
+   var centroidShiftedFrames = [];  // star position corrected by more than CENTROID_WARN_SHIFT_PX
+   var centroidFailedFrames  = [];  // no star found around the selected position
 
    for (var i = 0; i < frames.length; i++) {
       var f  = frames[i];
@@ -1164,8 +1278,17 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       }
 
       var satPct = Math.round((ap.saturated_fraction || 0) * 100);
-      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%% (%d px)  starXY=(%.1f,%.1f)",
-         f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, ap.saturated_pixels || 0, ap.starX, ap.starY));
+      console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%% (%d px)  starXY=(%.1f,%.1f)  %s",
+         f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, ap.saturated_pixels || 0, ap.starX, ap.starY,
+         ap.centroidRefined ? ("re-centered " + ap.centroidShift.toFixed(1) + " px")
+                            : "not re-centered (no star found)"));
+      if (!ap.centroidRefined && ap.centroidReason) {
+         console.warningln("    " + ap.centroidReason);
+      }
+      if (ap.centroidRefined && ap.centroidShift > CENTROID_WARN_SHIFT_PX) {
+         centroidShiftedFrames.push(f.filename);
+      }
+      if (!ap.centroidRefined) centroidFailedFrames.push(f.filename);
 
       measuredFrames.push({ filename: f.filename, exptime: f.exptime });
       skyFrameData.push({ exptime: f.exptime, adu_sky: bg.adu_sky });
@@ -1179,7 +1302,9 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
          exptime:             f.exptime,
          adu_star:            ap.adu_star,
          saturated_fraction:  ap.saturated_fraction || 0,
-         saturated_pixels:    ap.saturated_pixels || 0
+         saturated_pixels:    ap.saturated_pixels || 0,
+         centroid_shift:      ap.centroidShift,
+         centroid_refined:    ap.centroidRefined
       });
    }
 
@@ -1265,6 +1390,8 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       n_frames:         skyFrameData.length,
       excluded_frames:  lStarResult.excluded_frames || 0,
       nonlinear_frames: nonlinearFrames,
+      centroid_shifted_frames: centroidShiftedFrames,
+      centroid_failed_frames:  centroidFailedFrames,
       frameData:        frameResults,
       sqmChannel:       sqmChannel,
       bgX:              bgX,
@@ -2175,6 +2302,14 @@ constructor() {
       if (result.failure_reason) warnings.push(result.failure_reason);
       if (result.nonlinear_frames && result.nonlinear_frames.length > 0)
          warnings.push("Non-linear rate (not excluded): " + result.nonlinear_frames.join(", "));
+      if (result.centroid_shifted_frames && result.centroid_shifted_frames.length > 0) {
+         warnings.push("Star position was corrected by more than " + CENTROID_WARN_SHIFT_PX + " px in: "
+            + result.centroid_shifted_frames.join(", ") + " \u2014 check the plate solution or the selected star.");
+      }
+      if (result.centroid_failed_frames && result.centroid_failed_frames.length > 0) {
+         warnings.push("Could not find the star around the selected position in: "
+            + result.centroid_failed_frames.join(", ") + " \u2014 the aperture may be off the star.");
+      }
       this.resultWarningLabel.text = warnings.length > 0 ? "WARNING: " + warnings.join("  /  ") : "";
 
       // Refresh frame list with analysis status (Flux, Sat%, Status columns)

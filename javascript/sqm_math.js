@@ -348,6 +348,60 @@ function sqmFailureReason(info) {
 }
 
 // ============================================================
+// Star centroid refinement (issue #22)
+// ============================================================
+// Thresholds. The detection gate (10 sigma, 5 pixels) is the same as the one in
+// tests/pjsr/test_wcs_transform.js (MIN_DETECTION_SIGMA / MIN_SIGNIFICANT_PIXELS),
+// where the reasoning is written down: a real star clears both by a wide margin,
+// noise and hot pixels do not.
+var CENTROID_PIXEL_SIGMA    = 3.0;  // a pixel counts as "star" above mean + 3 std of the local sky
+var CENTROID_MIN_SIGMA      = 10;   // the peak must stand out at least this much (sigma)
+var CENTROID_MIN_PIXELS     = 5;    // ...and at least this many pixels must be significant
+var CENTROID_CONVERGE_PX    = 0.1;  // stop iterating when the center moves less than this
+var CENTROID_MAX_ITER       = 3;    // hard limit on re-centering passes
+var CENTROID_MAX_SHIFT_FRAC = 0.5;  // give up if the center moved more than aperture * this (probably another star)
+var CENTROID_WARN_SHIFT_PX  = 3;    // frames corrected by more than this are reported to the user
+
+/**
+ * Intensity-weighted centroid of the significant pixels inside the aperture.
+ * Pure function: no image access, so it can be tested in Node.
+ * @param {{x:number,y:number,v:number}[]} pixels - aperture pixels (x, y = pixel CENTER coordinates)
+ * @param {number} mean - local sky mean
+ * @param {number} std  - local sky standard deviation
+ * @returns {{ok:boolean, x:number, y:number, sigma:number, nSig:number, reason:(string|null)}}
+ */
+function significantPixelCentroid(pixels, mean, std) {
+    var fail = function(reason, sigma, nSig) {
+        return { ok: false, x: NaN, y: NaN, sigma: sigma, nSig: nSig, reason: reason };
+    };
+    if (!(std > 0) || pixels.length === 0) {
+        return fail("The sky around the selected position could not be measured.", 0, 0);
+    }
+    var peak = -Infinity;
+    var sw = 0, sx = 0, sy = 0, nSig = 0;
+    for (var i = 0; i < pixels.length; i++) {
+        var d = pixels[i].v - mean;
+        if (pixels[i].v > peak) peak = pixels[i].v;
+        if (d > CENTROID_PIXEL_SIGMA * std) {
+            nSig++;
+            sw += d;
+            sx += d * pixels[i].x;
+            sy += d * pixels[i].y;
+        }
+    }
+    var sigma = (peak - mean) / std;
+    if (!(sigma >= CENTROID_MIN_SIGMA)) {
+        return fail("No star found near the selected position (brightest pixel is only "
+            + sigma.toFixed(1) + " sigma above the sky).", sigma, nSig);
+    }
+    if (nSig < CENTROID_MIN_PIXELS) {
+        return fail("No star found near the selected position (only " + nSig
+            + " bright pixels).", sigma, nSig);
+    }
+    return { ok: true, x: sx / sw, y: sy / sw, sigma: sigma, nSig: nSig, reason: null };
+}
+
+// ============================================================
 // Node.js export
 // ============================================================
 
@@ -369,6 +423,10 @@ if (typeof module !== "undefined") {
         countDistinctExposures: countDistinctExposures,
         angularSeparationArcsec: angularSeparationArcsec,
         isCfaFrame:          isCfaFrame,
-        sqmFailureReason:    sqmFailureReason
+        sqmFailureReason:    sqmFailureReason,
+        significantPixelCentroid: significantPixelCentroid,
+        CENTROID_WARN_SHIFT_PX:   CENTROID_WARN_SHIFT_PX,
+        CENTROID_MIN_SIGMA:       CENTROID_MIN_SIGMA,
+        CENTROID_MIN_PIXELS:      CENTROID_MIN_PIXELS
     };
 }

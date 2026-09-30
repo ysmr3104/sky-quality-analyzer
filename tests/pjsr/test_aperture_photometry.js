@@ -2,6 +2,8 @@
 // test_aperture_photometry.js
 // PJSR test: aperturePhotometry() accepts a fractional star center.
 // A 0.3 px shift in the center should change the measured flux by <= 2%.
+// Since issue #22 the center is re-centroided on the star before measuring
+// (refineStarCenter), so the tests below also cover that.
 //
 // Run:
 //   bash tests/pjsr/run_pjsr_tests.sh tests/pjsr/test_aperture_photometry.js
@@ -17,6 +19,10 @@ var RESULT_PATH  = PROJECT_ROOT + "tests/pjsr/results/test_aperture_photometry_r
 // Kochab (beta UMi), J2000
 var KOCHAB_RA  = 222.676357;
 var KOCHAB_DEC = 74.155505;
+
+// HD 136919 (V=6.68, not saturated), same coordinates as TEST_STARS[0] in test_wcs_transform.js
+var HD_RA  = 229.34424277666997;
+var HD_DEC = 74.04514025971;
 
 var FRAME_10S = FIXTURE_DIR +
     "Light_Kochab_10.0s_Bin1_294MC_IRUV_gain120_20260327-001000_359deg_-10.0C_0005_c_d.xisf";
@@ -51,6 +57,11 @@ test("aperturePhotometry: flux changes <= 2% for a 0.3 px center shift", functio
     assertTrue(!isNaN(apInt.adu_star) && apInt.adu_star > 0, "integer-center flux should be positive");
     assertTrue(!isNaN(apShifted.adu_star) && apShifted.adu_star > 0, "shifted-center flux should be positive");
 
+    // Both starts are pulled to the star's centroid, so they should land together.
+    log("  measured center (int)=(" + apInt.starX.toFixed(3) + ", " + apInt.starY.toFixed(3) + ")"
+        + "  (+0.3px)=(" + apShifted.starX.toFixed(3) + ", " + apShifted.starY.toFixed(3) + ")");
+    assertTrue(Math.abs(apShifted.starX - apInt.starX) < 0.3 && Math.abs(apShifted.starY - apInt.starY) < 0.3,
+        "both starting points should converge to the same star center within 0.3 px");
     var diffPct = Math.abs(apShifted.adu_star - apInt.adu_star) / apInt.adu_star * 100;
     log("  flux(int)=" + apInt.adu_star.toFixed(1)
         + "  flux(+0.3px)=" + apShifted.adu_star.toFixed(1)
@@ -59,7 +70,7 @@ test("aperturePhotometry: flux changes <= 2% for a 0.3 px center shift", functio
         + diffPct.toFixed(3) + "%");
 });
 
-test("aperturePhotometry: starRaDec overrides starX/starY with the WCS-projected position", function() {
+test("aperturePhotometry: starRaDec overrides starX/starY; projectedX/Y is the WCS position, starX/Y the re-centered one", function() {
     var meta = readFrameMetadata(FRAME_10S);
     assertTrue(meta !== null, "readFrameMetadata returned null");
 
@@ -82,10 +93,16 @@ test("aperturePhotometry: starRaDec overrides starX/starY with the WCS-projected
     var apViaRaDec = aperturePhotometry(FRAME_10S, 0, 0, APERTURE, "G", starRaDec);
     assertTrue(apViaRaDec !== null, "aperturePhotometry (via starRaDec) returned null");
 
-    // (a) returned starX/starY should match celestialToImage() within 0.01 px.
-    log("  (a) apViaRaDec.starX/Y = (" + apViaRaDec.starX.toFixed(4) + ", " + apViaRaDec.starY.toFixed(4) + ")");
-    assertEqual(apViaRaDec.starX, expectedPt.x, "(a) returned starX should match celestialToImage", 0.01);
-    assertEqual(apViaRaDec.starY, expectedPt.y, "(a) returned starY should match celestialToImage", 0.01);
+    // (a) projectedX/projectedY should match celestialToImage() within 0.01 px;
+    // starX/starY is the re-centered position, a few px at most from it.
+    log("  (a) apViaRaDec.projectedX/Y = (" + apViaRaDec.projectedX.toFixed(4) + ", " + apViaRaDec.projectedY.toFixed(4) + ")"
+        + "  starX/Y = (" + apViaRaDec.starX.toFixed(4) + ", " + apViaRaDec.starY.toFixed(4) + ")"
+        + "  shift=" + apViaRaDec.centroidShift.toFixed(3) + " px  refined=" + apViaRaDec.centroidRefined);
+    assertEqual(apViaRaDec.projectedX, expectedPt.x, "(a) projectedX should match celestialToImage", 0.01);
+    assertEqual(apViaRaDec.projectedY, expectedPt.y, "(a) projectedY should match celestialToImage", 0.01);
+    assertTrue(apViaRaDec.centroidRefined === true, "(a) Kochab should be re-centered");
+    assertTrue(Math.abs(apViaRaDec.starX - expectedPt.x) <= 3 && Math.abs(apViaRaDec.starY - expectedPt.y) <= 3,
+        "(a) re-centered position should be within 3 px of the projection");
 
     // (b) adu_star should match a direct call using that same center (no starRaDec),
     // to within a relative 1e-9 — i.e. the starRaDec path isn't computing anything
@@ -185,6 +202,98 @@ test("aperturePhotometry: saturated pixels included in flux sum (issue #13)", fu
         + "  netFlux=" + independentNetFlux.toFixed(1));
     assertEqual(ap.adu_star, independentNetFlux, "adu_star should equal independently-summed "
         + "(all aperture pixels) - skyBg * count", 0.5);
+});
+
+// ============================================================
+// refineStarCenter (issue #22)
+// ============================================================
+
+// Open FRAME_10S, project (ra, dec), and call refineStarCenter at the projected
+// position shifted by (dx, dy). Returns { proj, res }.
+function refineAt(ra, dec, dx, dy) {
+    var wins = ImageWindow.open(FRAME_10S);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
+    var win = wins[0];
+    try {
+        assertEqual(win.hasAstrometricSolution, true, "hasAstrometricSolution should be true");
+        var pt = safeCelestialToImage(win, ra, dec);
+        assertTrue(pt !== null, "safeCelestialToImage returned null");
+        var res = refineStarCenter(win.mainView.image, 1, pt.x + dx, pt.y + dy, APERTURE);
+        return { proj: pt, res: res };
+    } finally {
+        win.forceClose();
+    }
+}
+
+function fmtRes(r) {
+    return "refined=" + r.refined + " (" + r.x.toFixed(3) + ", " + r.y.toFixed(3) + ") shift="
+        + r.shift.toFixed(3) + " reason=" + r.reason;
+}
+
+test("refineStarCenter: HD 136919 offset by (+4, -3) px lands where the unshifted call does", function() {
+    var base    = refineAt(HD_RA, HD_DEC, 0, 0);
+    var shifted = refineAt(HD_RA, HD_DEC, 4, -3);
+    log("  unshifted: " + fmtRes(base.res) + "  projected=(" + base.proj.x.toFixed(3) + ", " + base.proj.y.toFixed(3) + ")");
+    log("  (+4,-3)  : " + fmtRes(shifted.res));
+    assertTrue(base.res.refined === true, "unshifted call should be refined");
+    assertTrue(shifted.res.refined === true, "shifted call should be refined, reason: " + shifted.res.reason);
+    var d = Math.sqrt(Math.pow(shifted.res.x - base.res.x, 2) + Math.pow(shifted.res.y - base.res.y, 2));
+    log("  distance between the two refined centers = " + d.toFixed(3) + " px");
+    assertTrue(d <= 0.5, "refined centers should agree within 0.5 px, got " + d.toFixed(3));
+});
+
+test("refineStarCenter: HD 136919 offset by (+20, 0) px (star outside the window) is not refined", function() {
+    var r = refineAt(HD_RA, HD_DEC, 20, 0);
+    log("  (+20,0)  : " + fmtRes(r.res) + "  projected=(" + r.proj.x.toFixed(3) + ", " + r.proj.y.toFixed(3) + ")");
+    assertTrue(r.res.refined === false, "should not be refined");
+    assertTrue(typeof r.res.reason === "string" && r.res.reason.length > 0, "a reason should be given");
+    assertEqual(r.res.x, r.proj.x + 20, "x should stay at the input position", 1e-9);
+    assertEqual(r.res.y, r.proj.y, "y should stay at the input position", 1e-9);
+    assertEqual(r.res.shift, 0, "shift should be 0", 1e-9);
+});
+
+test("refineStarCenter: Kochab (saturated) is refined by <= 3 px", function() {
+    var r = refineAt(KOCHAB_RA, KOCHAB_DEC, 0, 0);
+    log("  Kochab   : " + fmtRes(r.res) + "  projected=(" + r.proj.x.toFixed(3) + ", " + r.proj.y.toFixed(3) + ")");
+    assertTrue(r.res.refined === true, "should be refined, reason: " + r.res.reason);
+    assertTrue(r.res.shift <= 3, "shift should be <= 3 px, got " + r.res.shift.toFixed(3));
+});
+
+test("aperturePhotometry: starX/Y equal refineStarCenter's result, projectedX/Y equal celestialToImage (HD 136919)", function() {
+    var ref = refineAt(HD_RA, HD_DEC, 0, 0);
+    var ap = aperturePhotometry(FRAME_10S, 0, 0, APERTURE, "G", { ra: HD_RA, dec: HD_DEC });
+    assertTrue(ap !== null, "aperturePhotometry returned null");
+    log("  ap: projected=(" + ap.projectedX.toFixed(4) + ", " + ap.projectedY.toFixed(4) + ")  star=("
+        + ap.starX.toFixed(4) + ", " + ap.starY.toFixed(4) + ")  shift=" + ap.centroidShift.toFixed(3)
+        + "  refined=" + ap.centroidRefined + "  adu_star=" + ap.adu_star.toFixed(1));
+    assertEqual(ap.projectedX, ref.proj.x, "projectedX should match celestialToImage", 1e-6);
+    assertEqual(ap.projectedY, ref.proj.y, "projectedY should match celestialToImage", 1e-6);
+    assertEqual(ap.starX, ref.res.x, "starX should match refineStarCenter", 1e-6);
+    assertEqual(ap.starY, ref.res.y, "starY should match refineStarCenter", 1e-6);
+    assertEqual(ap.centroidRefined, true, "centroidRefined");
+    assertTrue(ap.adu_star > 0, "HD 136919 flux should be positive");
+});
+
+// All six Kochab frames, as runAnalysis() would measure them (projection via each
+// frame's own solution). Records how far each frame's star was moved.
+test("aperturePhotometry: all Kochab frames are re-centered by <= 3 px", function() {
+    var names = [
+        "Light_Kochab_1.0s_Bin1_294MC_IRUV_gain120_20260327-000325_356deg_-10.0C_0005_c_d.xisf",
+        "Light_Kochab_2.0s_Bin1_294MC_IRUV_gain120_20260327-000418_356deg_-10.0C_0005_c_d.xisf",
+        "Light_Kochab_4.0s_Bin1_294MC_IRUV_gain120_20260327-000520_356deg_-10.0C_0005_c_d.xisf",
+        "Light_Kochab_6.0s_Bin1_294MC_IRUV_gain120_20260327-000631_356deg_-10.0C_0005_c_d.xisf",
+        "Light_Kochab_8.0s_Bin1_294MC_IRUV_gain120_20260327-000808_356deg_-10.0C_0005_c_d.xisf",
+        "Light_Kochab_10.0s_Bin1_294MC_IRUV_gain120_20260327-001000_359deg_-10.0C_0005_c_d.xisf"
+    ];
+    for (var i = 0; i < names.length; i++) {
+        var ap = aperturePhotometry(FIXTURE_DIR + names[i], 0, 0, APERTURE, "G", { ra: KOCHAB_RA, dec: KOCHAB_DEC });
+        assertTrue(ap !== null, "aperturePhotometry returned null for " + names[i]);
+        log("  " + names[i].substring(0, 20) + "  projected=(" + ap.projectedX.toFixed(2) + ", " + ap.projectedY.toFixed(2)
+            + ")  star=(" + ap.starX.toFixed(2) + ", " + ap.starY.toFixed(2) + ")  shift=" + ap.centroidShift.toFixed(2)
+            + " px  refined=" + ap.centroidRefined + "  sat=" + ap.saturated_pixels);
+        assertTrue(ap.centroidRefined === true, "should be re-centered: " + names[i] + " reason: " + ap.centroidReason);
+        assertTrue(ap.centroidShift <= 3, "shift should be <= 3 px, got " + ap.centroidShift.toFixed(2));
+    }
 });
 
 runAllTests(RESULT_PATH);

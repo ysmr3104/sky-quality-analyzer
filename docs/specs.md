@@ -748,6 +748,24 @@ L_star の線形フィットから除外する（`MAX_SAT_FRACTION = 0`、`sqm_m
 
 ピントをボカして撮影するため（6.2節参照）、アパーチャ半径を大きめに設定します。
 
+**測光の前に星の重心を取り直す（Issue #22）。** 投影した位置（`starRaDec` があるとき）もクリックした位置も、数 px ずれうる（解の誤差、手のぶれ、フィクスチャの状態）。原因にかかわらず、その位置のまわりで重心を取り直してから上の測光をする。`refineStarCenter(image, ch, cx, cy, aperture)`（`SkyQualityAnalyzer.js`）、判定部分は `significantPixelCentroid()`（`sqm_math.js`）。
+
+```
+1. 背景: 中心から半径 aperture+5 〜 aperture+25 のアニュラスを sigmaClippingStats(3σ, 10 回) に通し、mean と std を使う（MAD は使わない）
+2. 重心: 半径 aperture の円の中で「値 − mean > 3 × std」の画素だけを、重み「値 − mean」で平均する
+         画素 (ix, iy) の中心は (ix+0.5, iy+0.5)（開口測光と同じ取り決め）
+3. 検出の条件: (ピーク − mean) / std >= 10 かつ有意な画素が 5 個以上（test_wcs_transform.js の判定と同じ値）
+         満たさなければ取り直さない
+4. 反復: 新しい中心で 1〜3 を繰り返す。移動が 0.1 px 未満か 3 回で止める
+5. 上限: 元の位置からの移動が aperture / 2 を超えたら、別の星に引かれた可能性があるので取り直さない（元の位置のまま）
+```
+
+- 飽和した星でも動く（平坦な飽和部は対称なので重心を動かさない）。
+- 戻り値は `{ x, y, refined, shift, reason }`。`aperturePhotometry()` は取り直し前の位置を `projectedX/projectedY`、実際に測った位置を `starX/starY` で返し、`centroidShift`・`centroidRefined`・`centroidReason` を添える。
+- `runAnalysis()` はフレームごとの結果に `centroid_shift`・`centroid_refined` を入れる。**移動が 3 px を超えたフレーム、または取り直せなかったフレームは結果の警告に出す。**
+- 閾値はすべて `sqm_math.js` の名前付き定数（`CENTROID_*`）。
+- 却下した案: 画像全体から一番明るい星を探す（別の星を拾う）／取り直しの結果を WCS の補正として他のフレームに伝える（フレームごとに解があるので不要で、誤りが伝播する）／PSF フィット（ぼかした星のドーナツ像に合う PSF が無い）。
+
 ### 8.5 SIMBAD カタログ検索と Suitability 評価
 
 プレートソルブ済み XISF フレームが読み込まれている場合、「Find in Catalog...」ボタンで SIMBAD TAP サービスを検索し、画角内の明るい星を一覧表示します。
