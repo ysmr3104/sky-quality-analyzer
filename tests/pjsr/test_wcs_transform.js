@@ -110,6 +110,13 @@ function assertStarAtProjectedPosition(filepath, label) {
 // from a correct one using only a star on the vertical center line. So this
 // uses three isolated, unsaturated stars (SIMBAD J2000), one off to the side
 // and one near each vertical edge:
+// FIXTURE NOTE: the 6 Kochab fixtures had their pixel rows flipped vertically
+// relative to their own astrometric solution (they were re-saved the day after
+// capture). On 2026-09-30 the pixels were flipped back with
+// Image.mirrorVertical(), leaving the solution untouched (the originals are
+// kept in tests/fixtures/xisf/_flipped_backup/ on the signing machine). If the
+// fixtures are ever re-created from the flipped copies, the top/bottom-edge
+// stars below will fail — that is the fixture, not the code. See issue #22.
 var TEST_STARS = [
     {
         // V=6.681. No other V-magnitude star within 3' per SIMBAD. Projects to
@@ -170,6 +177,7 @@ function backgroundStats(image, ch, cx, cy, rIn, rOut) {
 function significantPixelCentroid(image, ch, cx, cy, r, bgMean, bgStd) {
     var wSum = 0, wxSum = 0, wySum = 0;
     var peak = -1;
+    var nSig = 0;
     var yLo = Math.floor(cy - r) - 1, yHi = Math.ceil(cy + r) + 1;
     var xLo = Math.floor(cx - r) - 1, xHi = Math.ceil(cx + r) + 1;
     for (var y = yLo; y <= yHi; y++) {
@@ -185,13 +193,14 @@ function significantPixelCentroid(image, ch, cx, cy, r, bgMean, bgStd) {
             if (bgStd <= 0) continue;
             var w = v - bgMean;
             if (w <= 3 * bgStd) continue; // keep only >3sigma pixels
+            nSig++;
             wSum  += w;
             wxSum += w * px;
             wySum += w * py;
         }
     }
     if (peak < 0 || wSum <= 0) return null;
-    return { x: wxSum / wSum, y: wySum / wSum, peak: peak };
+    return { x: wxSum / wSum, y: wySum / wSum, peak: peak, nSig: nSig };
 }
 
 // Runs the significant-pixel centroid check at an explicit pixel center
@@ -205,14 +214,33 @@ function centroidCheckAt(image, ch, cx, cy, r) {
     var result = significantPixelCentroid(image, ch, cx, cy, r, bg.mean, bg.std);
     if (!result) return null;
     var sigma = (bg.std > 0) ? (result.peak - bg.mean) / bg.std : NaN;
-    return { sigma: sigma, diffX: result.x - cx, diffY: result.y - cy };
+    return { sigma: sigma, nSig: result.nSig, diffX: result.x - cx, diffY: result.y - cy };
 }
 
 // 3px: the residual between celestialToImage()'s position and each star's
 // actual pixel position (found via the significant-pixel centroid above) was
 // <= 3px for all three stars in both exposures.
 var CENTROID_TOLERANCE_PX = 3;
-var MIN_DETECTION_SIGMA   = 5;
+// 10 sigma and >= 5 significant pixels: an empty window (no star) measured
+// up to 4.6 sigma on the flipped fixtures, so 5 sigma left only a 0.4 sigma
+// margin; the faintest real test star is 32 sigma. The pixel count keeps a
+// single hot pixel from passing.
+var MIN_DETECTION_SIGMA    = 10;
+var MIN_SIGNIFICANT_PIXELS = 5;
+
+// Shared by the real checks and the mutation tests. Returns
+// { ok, gate, reason } where gate is "none" | "sigma" | "pixels" | "tolerance" | "pass".
+function judgeCentroid(check) {
+    if (!check) return { ok: false, gate: "none", reason: "no pixels 3sigma above background" };
+    if (!(check.sigma >= MIN_DETECTION_SIGMA))
+        return { ok: false, gate: "sigma", reason: "sigma=" + check.sigma.toFixed(2) + " < " + MIN_DETECTION_SIGMA };
+    if (check.nSig < MIN_SIGNIFICANT_PIXELS)
+        return { ok: false, gate: "pixels", reason: "only " + check.nSig + " pixels > 3sigma (< " + MIN_SIGNIFICANT_PIXELS + ")" };
+    if (Math.abs(check.diffX) > CENTROID_TOLERANCE_PX || Math.abs(check.diffY) > CENTROID_TOLERANCE_PX)
+        return { ok: false, gate: "tolerance", reason: "diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ") exceeds " + CENTROID_TOLERANCE_PX + "px" };
+    return { ok: true, gate: "pass", reason: "sigma=" + check.sigma.toFixed(2) + " nSig=" + check.nSig
+        + " diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ")" };
+}
 
 function assertProjectionMatchesCentroid(filepath, label, star) {
     var wins = ImageWindow.open(filepath);
@@ -232,14 +260,9 @@ function assertProjectionMatchesCentroid(filepath, label, star) {
         assertTrue(check !== null, label + ": " + star.name
             + " — no pixels 3sigma above background within the aperture (no detectable star at the projected position)");
 
-        log("  " + label + ": " + star.name + " sigma=" + check.sigma.toFixed(2)
-            + " diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ")");
-        assertTrue(check.sigma >= MIN_DETECTION_SIGMA, label + ": " + star.name
-            + " peak should be >= " + MIN_DETECTION_SIGMA + "sigma above background, got " + check.sigma.toFixed(2) + "sigma");
-        assertTrue(Math.abs(check.diffX) <= CENTROID_TOLERANCE_PX, label + ": " + star.name
-            + " centroid x should be within " + CENTROID_TOLERANCE_PX + "px of celestialToImage, diff=" + check.diffX.toFixed(2));
-        assertTrue(Math.abs(check.diffY) <= CENTROID_TOLERANCE_PX, label + ": " + star.name
-            + " centroid y should be within " + CENTROID_TOLERANCE_PX + "px of celestialToImage, diff=" + check.diffY.toFixed(2));
+        var verdict = judgeCentroid(check);
+        log("  " + label + ": " + star.name + " " + verdict.reason);
+        assertTrue(verdict.ok, label + ": " + star.name + " — " + verdict.reason);
     } finally {
         win.forceClose();
     }
@@ -266,7 +289,9 @@ for (var _si = 0; _si < TEST_STARS.length; _si++) {
 // shifting HD 136919's projected position by (84, 0) must make it fail,
 // either by finding no 3sigma signal, by failing the 5sigma detection
 // requirement, or by landing outside the tolerance.
-test("mutation: centroid check must fail when the center is wrong by (84, 0)", function() {
+// Runs the centroid check at HD 136919's projection shifted by (dx, dy) on the
+// 10s frame and returns the verdict.
+function judgeShifted(dx, dy) {
     var wins = ImageWindow.open(FRAME_10S);
     assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
     var win = wins[0];
@@ -274,34 +299,31 @@ test("mutation: centroid check must fail when the center is wrong by (84, 0)", f
         var star = TEST_STARS[0]; // HD 136919
         var pt = win.celestialToImage(star.ra, star.dec);
         assertTrue(pt !== null, "celestialToImage returned null");
-        var wrongX = pt.x + 84;
-        var wrongY = pt.y;
-
-        var image = win.mainView.image;
-        var check = centroidCheckAt(image, 1, wrongX, wrongY, STAR_APERTURE);
-
-        var failed;
-        var reason;
-        if (!check) {
-            failed = true;
-            reason = "no pixels 3sigma above background";
-        } else if (check.sigma < MIN_DETECTION_SIGMA) {
-            failed = true;
-            reason = "sigma=" + check.sigma.toFixed(2) + " < " + MIN_DETECTION_SIGMA;
-        } else if (Math.abs(check.diffX) > CENTROID_TOLERANCE_PX || Math.abs(check.diffY) > CENTROID_TOLERANCE_PX) {
-            failed = true;
-            reason = "diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ") exceeds " + CENTROID_TOLERANCE_PX + "px";
-        } else {
-            failed = false;
-            reason = "sigma=" + check.sigma.toFixed(2) + " diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ")";
-        }
-        log("  wrong center=(" + wrongX.toFixed(2) + "," + wrongY.toFixed(2) + "): " + reason
-            + " -> " + (failed ? "correctly failed" : "WRONGLY PASSED"));
-        assertTrue(failed, "shifting the center by (84,0) should make the centroid check fail, but it passed: " + reason);
+        var check = centroidCheckAt(win.mainView.image, 1, pt.x + dx, pt.y + dy, STAR_APERTURE);
+        var verdict = judgeCentroid(check);
+        log("  shift=(" + dx + "," + dy + "): gate=" + verdict.gate + " " + verdict.reason);
+        return verdict;
     } finally {
         win.forceClose();
     }
+}
+
+// Mutation 1: 84px off (the retired implementation's measured error for this
+// star). The star is outside the window, so the detection gates must reject it.
+test("mutation: centroid check must fail when the center is wrong by (84, 0)", function() {
+    var v = judgeShifted(84, 0);
+    assertTrue(!v.ok, "shifting the center by (84,0) should fail, but it passed: " + v.reason);
 });
+
+// Mutation 2: 6px off. The star stays inside the window (still detected), so
+// only the 3px tolerance can reject it. Without this, a centroid that always
+// returned the window center would pass every other test. 6px is also about
+// what a vertical flip does to a star on the center line (HD 136919, Kochab).
+test("mutation: 3px tolerance must reject a (6, 0) offset with the star still detected", function() {
+    var v = judgeShifted(6, 0);
+    assertEqual(v.gate, "tolerance", "a (6,0) shift should be rejected by the tolerance gate (" + v.reason + ")");
+});
+
 
 // Auxiliary: Kochab sits near the tangent point, so this only confirms a star
 // is roughly where celestialToImage() says — see TEST_STARS above for the
