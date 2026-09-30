@@ -174,10 +174,111 @@ assert(math.skyConditionLabel(17.999) === "Urban Sky",               "17.999 →
 // ============================================================
 console.log("\n--- normalizedToADU ---");
 
-assertClose(math.normalizedToADU(1.0, 16),   65535,      1,  "16bit: max = 65535");
-assertClose(math.normalizedToADU(0.5, 16),   32767.5,    1,  "16bit: half = 32767.5");
-assertClose(math.normalizedToADU(0.008, 16), 524.28,     1,  "16bit: 0.008 ≈ 524 ADU");
-assertClose(math.normalizedToADU(1.0, 32),   4294967295, 1,  "32bit: max");
+assertClose(math.normalizedToADU(1.0, false, 16),   65535,      1,  "16bit int: max = 65535");
+assertClose(math.normalizedToADU(0.5, false, 16),   32767.5,    1,  "16bit int: half = 32767.5");
+assertClose(math.normalizedToADU(0.008, false, 16), 524.28,     1,  "16bit int: 0.008 ≈ 524 ADU");
+assertClose(math.normalizedToADU(1.0, false, 32),   4294967295, 1,  "32bit int: max");
+assertClose(math.normalizedToADU(1.0, true, 32),    65535,      1,  "32bit float: max = 65535 (16bit equivalent)");
+assertClose(math.normalizedToADU(0.008, true, 32),  524.28,     1,  "32bit float: 0.008 ≈ 524 ADU");
+
+// The saturation limit (0.97 of maxADU) stays 0.97 in normalized units for every format
+var satOk = true;
+var fmts = [[true, 32], [false, 32], [false, 16], [true, 16]];
+for (var fi = 0; fi < fmts.length; fi++) {
+    var mx = math.maxADUFor(fmts[fi][0], fmts[fi][1]);
+    var lim = 0.97 * mx;
+    if (!(math.normalizedToADU(0.97, fmts[fi][0], fmts[fi][1]) >= lim)) satOk = false;
+    if (math.normalizedToADU(0.969, fmts[fi][0], fmts[fi][1]) >= lim) satOk = false;
+}
+assert(satOk, "saturation limit is 0.97 in normalized units for all formats");
+
+// ============================================================
+// maxADUFor
+// ============================================================
+console.log("\n--- maxADUFor ---");
+
+assert(math.maxADUFor(true, 32)  === 65535,      "float 32bit -> 65535");
+assert(math.maxADUFor(true, 64)  === 65535,      "float 64bit -> 65535");
+assert(math.maxADUFor(false, 32) === 4294967295, "int 32bit -> 4294967295");
+assert(math.maxADUFor(false, 16) === 65535,      "int 16bit -> 65535");
+assert(math.maxADUFor(false, 8)  === 65535,      "int 8bit -> 65535 (other)");
+
+// ============================================================
+// skyConditionLabel: not finite -> null
+// ============================================================
+console.log("\n--- skyConditionLabel (non-finite) ---");
+
+assert(math.skyConditionLabel(NaN) === null,       "NaN -> null");
+assert(math.skyConditionLabel(Infinity) === null,  "Infinity -> null");
+assert(math.skyConditionLabel(-Infinity) === null, "-Infinity -> null");
+assert(math.skyConditionLabel(undefined) === null, "undefined -> null");
+
+// ============================================================
+// countDistinctExposures
+// ============================================================
+console.log("\n--- countDistinctExposures ---");
+
+assert(math.countDistinctExposures([]) === 0,                  "empty -> 0");
+assert(math.countDistinctExposures([2, 2, 2]) === 1,           "[2,2,2] -> 1");
+assert(math.countDistinctExposures([1, 1.0004, 2]) === 2,      "[1,1.0004,2] -> 2 (0.4 ms is the same)");
+assert(math.countDistinctExposures([1, 1.001]) === 2,          "1 ms difference is distinct (boundary)");
+assert(math.countDistinctExposures([1, 1.0009]) === 1,         "0.9 ms difference is the same");
+assert(math.countDistinctExposures([8, 1, 4, 2, 1, 8]) === 4,  "unsorted with duplicates -> 4");
+assert(math.countDistinctExposures([1, 1.0006, 1.0012]) === 2, "chain does not merge into one group");
+
+// ============================================================
+// angularSeparationArcsec
+// ============================================================
+console.log("\n--- angularSeparationArcsec ---");
+
+assertClose(math.angularSeparationArcsec(10, 20, 10, 20), 0, 1e-9,   "same point -> 0");
+assertClose(math.angularSeparationArcsec(10, 20, 10, 21), 3600, 0.01, "1 deg in Dec -> 3600 arcsec");
+assertClose(math.angularSeparationArcsec(359.9, 0, 0.1, 0), 720, 0.01, "RA wraps around 0/360 at the equator");
+assertClose(math.angularSeparationArcsec(0, 89.5, 180, 89.5), 3600, 0.01, "over the pole: 1 deg apart");
+assertClose(math.angularSeparationArcsec(0, 90, 123, 90), 0, 1e-6,   "at the pole RA is irrelevant");
+assertClose(math.angularSeparationArcsec(0, 60, 1, 60), 1800 * 1.0, 5, "1 deg RA at Dec 60 ≈ 0.5 deg");
+assertClose(math.angularSeparationArcsec(0, 0, 180, 0), 648000, 0.01, "antipodal -> 180 deg");
+
+// ============================================================
+// isCfaFrame
+// ============================================================
+console.log("\n--- isCfaFrame ---");
+
+assert(math.isCfaFrame(1, "RGGB") === true,    "1 channel + RGGB -> CFA");
+assert(math.isCfaFrame(3, "RGGB") === false,   "3 channels + RGGB (debayered) -> not CFA");
+assert(math.isCfaFrame(1, "") === false,       "1 channel, empty pattern -> mono");
+assert(math.isCfaFrame(1, "   ") === false,    "1 channel, blank pattern -> mono");
+assert(math.isCfaFrame(1, null) === false,     "1 channel, no keyword -> mono");
+
+// ============================================================
+// sqmFailureReason
+// ============================================================
+console.log("\n--- sqmFailureReason ---");
+
+var okInfo = { nUsedStarFrames: 4, L_star: 100, L_sky: 5, L_prime_sky: 0.5, distinctExposures: 4 };
+assert(math.sqmFailureReason(okInfo) === null, "valid info -> null");
+function withInfo(over) {
+    var o = {};
+    for (var k in okInfo) o[k] = okInfo[k];
+    for (var k2 in over) o[k2] = over[k2];
+    return o;
+}
+var r1 = math.sqmFailureReason(withInfo({ nUsedStarFrames: 1 }));
+assert(typeof r1 === "string" && r1.indexOf("Fewer than 2") === 0, "1 usable frame -> frames reason");
+assert(math.sqmFailureReason(withInfo({ nUsedStarFrames: 2 })) === null, "2 usable frames -> ok (boundary)");
+var r2 = math.sqmFailureReason(withInfo({ distinctExposures: 1 }));
+assert(typeof r2 === "string" && r2.indexOf("same exposure") >= 0, "1 distinct exposure -> exposure reason");
+var r3 = math.sqmFailureReason(withInfo({ L_star: 0 }));
+assert(typeof r3 === "string" && r3.indexOf("star") >= 0, "L_star = 0 -> star reason");
+assert(math.sqmFailureReason(withInfo({ L_star: -3 })) !== null, "L_star < 0 -> reason");
+assert(math.sqmFailureReason(withInfo({ L_star: NaN })) !== null, "L_star NaN -> reason");
+var r4 = math.sqmFailureReason(withInfo({ L_sky: 0, L_prime_sky: 0 }));
+assert(typeof r4 === "string" && r4.indexOf("background") >= 0, "L_sky = 0 -> background reason");
+assert(math.sqmFailureReason(withInfo({ L_sky: -1, L_prime_sky: -0.1 })) !== null, "L_sky < 0 -> reason");
+assert(math.sqmFailureReason(withInfo({ nUsedStarFrames: 0, distinctExposures: 0, L_star: NaN })).indexOf("Fewer than 2") === 0,
+    "frame shortage takes priority over other reasons");
+var noInternal = [r1, r2, r3, r4].join(" ");
+assert(!/L_star|L_sky|adu_/.test(noInternal), "reasons contain no internal variable names");
 
 // ============================================================
 // sigmaClippingStats: mean field

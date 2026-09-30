@@ -220,10 +220,13 @@ function computePixelScale(pixel_pitch_um, focal_length_mm, binning) {
 
 /**
  * Return a descriptive sky condition label for a given SQM value.
+ * Returns null when sqm is not a finite number: with no value there must be
+ * no label (a label would make a missing value look like a measurement).
  * @param {number} sqm
- * @returns {string}
+ * @returns {string|null}
  */
 function skyConditionLabel(sqm) {
+    if (typeof sqm !== "number" || !isFinite(sqm)) return null;
     if (sqm >= 22.0) return "Pristine Dark Sky";
     if (sqm >= 21.5) return "Truly Dark Sky";
     if (sqm >= 21.0) return "Rural Sky";
@@ -234,14 +237,114 @@ function skyConditionLabel(sqm) {
 }
 
 /**
+ * Maximum ADU value used to convert PixInsight normalized samples [0, 1] to ADU.
+ * Floating-point images have no native ADU scale, so they are taken as 16-bit
+ * equivalent (65535). Only 32-bit integer images use the 32-bit range.
+ * This is the only place the 32-bit range appears.
+ * @param {boolean} isReal        - true for floating-point images (image.isReal)
+ * @param {number} bitsPerSample  - image.bitsPerSample
+ * @returns {number}
+ */
+function maxADUFor(isReal, bitsPerSample) {
+    if (isReal) return 65535;
+    if (bitsPerSample === 32) return 4294967295;
+    return 65535;
+}
+
+/**
  * Convert PixInsight normalized pixel value (0-1) to ADU.
- * @param {number} normalized   - PixInsight sample value [0, 1]
- * @param {number} bitsPerSample - Bit depth (16 or 32)
+ * @param {number} normalized     - PixInsight sample value [0, 1]
+ * @param {boolean} isReal        - true for floating-point images
+ * @param {number} bitsPerSample  - Bit depth
  * @returns {number} ADU value
  */
-function normalizedToADU(normalized, bitsPerSample) {
-    var maxADU = (bitsPerSample === 32) ? 4294967295 : 65535;
-    return normalized * maxADU;
+function normalizedToADU(normalized, isReal, bitsPerSample) {
+    return normalized * maxADUFor(isReal, bitsPerSample);
+}
+
+/**
+ * Count distinct exposure times. Values closer than 1 ms are the same exposure.
+ * @param {number[]} exptimes
+ * @returns {number}
+ */
+function countDistinctExposures(exptimes) {
+    var sorted = [];
+    for (var i = 0; i < exptimes.length; i++) {
+        if (typeof exptimes[i] === "number" && isFinite(exptimes[i])) sorted.push(exptimes[i]);
+    }
+    sorted.sort(function(a, b) { return a - b; });
+    var count = 0;
+    var groupStart = 0;
+    for (var j = 0; j < sorted.length; j++) {
+        // Compare with the first value of the group so the chain cannot drift.
+        if (j === 0 || sorted[j] - groupStart >= 0.001 - 1e-9) {
+            count++;
+            groupStart = sorted[j];
+        }
+    }
+    return count;
+}
+
+/**
+ * Great-circle distance between two sky positions (haversine), in arcseconds.
+ * @param {number} ra1  - RA [deg]
+ * @param {number} dec1 - Dec [deg]
+ * @param {number} ra2  - RA [deg]
+ * @param {number} dec2 - Dec [deg]
+ * @returns {number} separation [arcsec]
+ */
+function angularSeparationArcsec(ra1, dec1, ra2, dec2) {
+    var d2r = Math.PI / 180;
+    var dDec = (dec2 - dec1) * d2r;
+    var dRa  = (ra2 - ra1) * d2r;
+    var h = Math.sin(dDec / 2) * Math.sin(dDec / 2)
+          + Math.cos(dec1 * d2r) * Math.cos(dec2 * d2r) * Math.sin(dRa / 2) * Math.sin(dRa / 2);
+    if (h > 1) h = 1;
+    return 2 * Math.asin(Math.sqrt(h)) / d2r * 3600;
+}
+
+/**
+ * True when a frame is a raw CFA (not yet debayered) image: a single channel
+ * carrying a Bayer pattern keyword. Debayered 3-channel images can keep the
+ * keyword, so the channel count is part of the test.
+ * @param {number} numberOfChannels
+ * @param {string} bayerPattern - value of BAYERPAT / BAYERPATTERN ("" if absent)
+ * @returns {boolean}
+ */
+function isCfaFrame(numberOfChannels, bayerPattern) {
+    if (numberOfChannels !== 1) return false;
+    if (typeof bayerPattern !== "string") return false;
+    return bayerPattern.trim().length > 0;
+}
+
+/**
+ * Explain why no SQM value could be computed. Returns null when nothing is
+ * wrong. Messages are for the operator, so they name what to change and use no
+ * internal variable names.
+ * @param {{nUsedStarFrames: number, L_star: number, L_sky: number,
+ *          L_prime_sky: number, distinctExposures: number}} info
+ *   nUsedStarFrames   - frames that went into the star fit (saturated ones excluded)
+ *   distinctExposures - distinct exposure times among those frames
+ * @returns {string|null}
+ */
+function sqmFailureReason(info) {
+    if (info.nUsedStarFrames < 2) {
+        return "Fewer than 2 usable frames (frames with saturated star pixels are excluded)"
+            + " \u2014 use shorter exposures or defocus the star more.";
+    }
+    if (info.distinctExposures < 2) {
+        return "The usable frames all have the same exposure time \u2014"
+            + " at least 2 different exposure times are needed.";
+    }
+    if (!(info.L_star > 0)) {
+        return "The star's brightness does not increase with exposure time \u2014"
+            + " check the star position (it may be off the star) or whether the star is too faint.";
+    }
+    if (!(info.L_sky > 0) || !(info.L_prime_sky > 0)) {
+        return "The background brightness does not increase with exposure time \u2014"
+            + " check the background region.";
+    }
+    return null;
 }
 
 // ============================================================
@@ -261,6 +364,11 @@ if (typeof module !== "undefined") {
         computeSQM:          computeSQM,
         computePixelScale:   computePixelScale,
         skyConditionLabel:   skyConditionLabel,
-        normalizedToADU:     normalizedToADU
+        normalizedToADU:     normalizedToADU,
+        maxADUFor:           maxADUFor,
+        countDistinctExposures: countDistinctExposures,
+        angularSeparationArcsec: angularSeparationArcsec,
+        isCfaFrame:          isCfaFrame,
+        sqmFailureReason:    sqmFailureReason
     };
 }
