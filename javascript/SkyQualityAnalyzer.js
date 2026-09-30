@@ -1274,6 +1274,12 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    };
 }
 
+// Format a number for display, or an em dash when it is not finite
+// (a failed fit must not show up as "NaN" next to real-looking units).
+function fixedOrDash(value, digits) {
+   return (typeof value === "number" && isFinite(value)) ? value.toFixed(digits) : "\u2014";
+}
+
 //============================================================================
 // CSV export
 //============================================================================
@@ -2147,10 +2153,10 @@ constructor() {
       this.resultSQMLabel.text = "SQM:             "
          + (result.label !== null ? result.sqm.toFixed(3) + " mag/arcsec\u00b2" : dash);
       this.resultConditionLabel.text = "Sky Condition:   " + (result.label !== null ? result.label : dash);
-      this.resultLSkyLabel.text  = "L_sky:           " + result.L_sky.toFixed(4)
-         + " counts/s/px  (R\u00b2=" + result.r2_sky.toFixed(4) + ")";
-      this.resultLStarLabel.text = "L_star:          " + result.L_star.toFixed(1)
-         + " counts/s  (R\u00b2=" + result.r2_star.toFixed(4) + ")" + excludedStr;
+      this.resultLSkyLabel.text  = "L_sky:           " + fixedOrDash(result.L_sky, 4)
+         + " counts/s/px  (R\u00b2=" + fixedOrDash(result.r2_sky, 4) + ")";
+      this.resultLStarLabel.text = "L_star:          " + fixedOrDash(result.L_star, 1)
+         + " counts/s  (R\u00b2=" + fixedOrDash(result.r2_star, 4) + ")" + excludedStr;
       this.resultPixScaleLabel.text = "Pixel Scale:     " + result.pixel_scale.toFixed(3) + " arcsec/px";
       this.resultNFramesLabel.text  = "Frames:          " + result.n_frames + " measured"
          + (nExcluded > 0 ? ",  " + nUsed + " used for L_star  (" + nExcluded + " sat excluded)" : "");
