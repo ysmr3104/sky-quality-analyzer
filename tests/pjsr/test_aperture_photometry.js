@@ -322,20 +322,44 @@ function makeRng(seed) {
     };
 }
 
-// Pixel (ix, iy) is evaluated at its center (ix + 0.5, iy + 0.5).
+// Fraction of pixel (ix, iy) covered by the ring rIn..rOut around (cx, cy),
+// from an 8x8 sub-sample grid. The pixel spans [ix, ix+1) x [iy, iy+1), so its
+// center is (ix+0.5, iy+0.5) as everywhere else. Anti-aliasing is needed: with
+// a hard edge sampled only at pixel centers, the lattice-point count of a
+// 263-pixel ring alone shifts its centroid by ~0.1 px (measured in Node), which
+// would be the test's own error, not the code's.
+function ringCoverage(ix, iy, cx, cy, rIn, rOut) {
+    var n = 8, c = 0;
+    for (var i = 0; i < n; i++) {
+        for (var j = 0; j < n; j++) {
+            var dx = ix + (i + 0.5) / n - cx;
+            var dy = iy + (j + 0.5) / n - cy;
+            var d2 = dx * dx + dy * dy;
+            if (d2 >= rIn * rIn && d2 <= rOut * rOut) c++;
+        }
+    }
+    return c / (n * n);
+}
+
+function addDonut(img, cx, cy, rIn, rOut) {
+    for (var y = 0; y < SYN_H; y++) {
+        for (var x = 0; x < SYN_W; x++) {
+            if (Math.abs(x + 0.5 - cx) > rOut + 1 || Math.abs(y + 0.5 - cy) > rOut + 1) continue;
+            var f = ringCoverage(x, y, cx, cy, rIn, rOut);
+            if (f > 0) img.setSample(img.sample(x, y, 0) + SYN_RING * f, x, y, 0);
+        }
+    }
+}
+
 function makeDonutImage(cx, cy, rIn, rOut) {
     var img = new Image(SYN_W, SYN_H, 1);
     var gauss = makeRng(12345);
     for (var y = 0; y < SYN_H; y++) {
         for (var x = 0; x < SYN_W; x++) {
-            var dx = x + 0.5 - cx;
-            var dy = y + 0.5 - cy;
-            var d2 = dx * dx + dy * dy;
-            var v = SYN_BG + SYN_NOISE * gauss();
-            if (d2 >= rIn * rIn && d2 <= rOut * rOut) v += SYN_RING;
-            img.setSample(v, x, y, 0);
+            img.setSample(SYN_BG + SYN_NOISE * gauss(), x, y, 0);
         }
     }
+    addDonut(img, cx, cy, rIn, rOut);
     return img;
 }
 
@@ -373,19 +397,12 @@ test("refineStarCenter: synthetic donut, start where only the far rim is inside 
     }
 });
 
-test("refineStarCenter: synthetic donut, a second star near the start wins (nearest star is followed)", function() {
-    // Star A at the true center, star B 11 px to the right. Starting on B's
-    // center converges to B, not to A (A's ring is partly in the window, but B dominates).
+test("refineStarCenter: synthetic donut, with two stars the one near the start is followed", function() {
+    // Star A at the true center, star B 40 px to the right. Starting near B
+    // converges to B's center.
     var img = makeDonutImage(SYN_CX, SYN_CY, 4, 10);
-    var gauss = makeRng(999);
     var bx = SYN_CX + 40, by = SYN_CY; // far enough that A never enters B's window
-    for (var y = 0; y < SYN_H; y++) {
-        for (var x = 0; x < SYN_W; x++) {
-            var dx = x + 0.5 - bx, dy = y + 0.5 - by;
-            var d2 = dx * dx + dy * dy;
-            if (d2 >= 16 && d2 <= 100) img.setSample(img.sample(x, y, 0) + SYN_RING, x, y, 0);
-        }
-    }
+    addDonut(img, bx, by, 4, 10);
     var r = refineStarCenter(img, 0, bx + 2, by - 1, APERTURE);
     var err = Math.sqrt(Math.pow(r.x - bx, 2) + Math.pow(r.y - by, 2));
     log("  second star: " + fmtRes(r) + "  error vs B=" + err.toFixed(4));
