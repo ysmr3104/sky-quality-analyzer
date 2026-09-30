@@ -53,16 +53,26 @@ for SCRIPT_REL in "$@"; do
     echo "  result: $RESULT_FILE"
     echo "  log:    $LOG_FILE"
 
+    # 前回の結果を消してから実行する。残っていると、今回スクリプトが黙って
+    # 落ちても（例: 1 行目の #engine v8 忘れ）古い結果を「成功」と読んでしまう
+    rm -f "$RESULT_FILE" "$LOG_FILE"
+
     # PixInsight を automation-mode で実行
+    # -n: 新規インスタンスとして起動する(GUIが起動中でも並行実行できる)
+    # --no-splash: スプラッシュ画面を出さない
     "$PIXINSIGHT" \
+        -n \
+        --no-splash \
         --automation-mode \
         -r="$SCRIPT_ABS" \
         --force-exit \
         2>&1 || true
 
-    # hello_automation.js のような結果JSONを持たないスクリプトはスキップ
+    # 結果JSONが無い＝スクリプトが最後まで走らなかった。スキップではなく失敗として扱う
     if [ ! -f "$RESULT_FILE" ]; then
-        echo "  NOTE: 結果JSONが見つかりません。スキップします: $RESULT_FILE"
+        echo "  ERROR: 結果JSONが生成されませんでした（スクリプトが途中で止まった可能性）: $RESULT_FILE"
+        echo "  1 行目に #engine v8 があるか、PixInsight の Process Console を確認してください"
+        OVERALL_EXIT=1
         echo "==================================="
         continue
     fi

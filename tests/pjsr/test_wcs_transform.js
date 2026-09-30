@@ -1,5 +1,9 @@
+#engine v8
 // test_wcs_transform.js
-// PJSR test: raDecToPixel() / pixelToRaDec() — WCS round-trip using real frame WCS
+// PJSR test: native astrometric solution (ImageWindow.celestialToImage /
+// imageToCelestial) — verified against an independent criterion (does the
+// projected position actually land on the star), not by round-tripping
+// through the same transform.
 //
 // Run:
 //   bash tests/pjsr/run_pjsr_tests.sh tests/pjsr/test_wcs_transform.js
@@ -12,73 +16,345 @@ var PROJECT_ROOT = File.extractDrive(#__FILE__) + File.extractDirectory(#__FILE_
 var FIXTURE_DIR  = PROJECT_ROOT + "tests/fixtures/xisf/";
 var RESULT_PATH  = PROJECT_ROOT + "tests/pjsr/results/test_wcs_transform_result.json";
 
-// Use the 1s frame (plate-solved, WCS in binary XISF header)
+// Kochab (beta UMi), J2000 catalog position — independent of anything the
+// script itself computes.
+var KOCHAB_RA  = 222.676357;
+var KOCHAB_DEC = 74.155505;
+
 var FRAME_1S = FIXTURE_DIR +
     "Light_Kochab_1.0s_Bin1_294MC_IRUV_gain120_20260327-000325_356deg_-10.0C_0005_c_d.xisf";
+var FRAME_10S = FIXTURE_DIR +
+    "Light_Kochab_10.0s_Bin1_294MC_IRUV_gain120_20260327-001000_359deg_-10.0C_0005_c_d.xisf";
+
+var STAR_APERTURE = 15; // px, same as the script's default aperture radius
+
+// Project Kochab's catalog RA/Dec onto the frame with celestialToImage(), then
+// confirm the projected position actually sits on the star: the max G-channel
+// (ch 1) value within STAR_APERTURE px must exceed the surrounding background
+// annulus median by >= 0.5 (normalized pixel value, 0-1 range).
+function assertStarAtProjectedPosition(filepath, label) {
+    var wins = ImageWindow.open(filepath);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed: " + filepath);
+    var win = wins[0];
+    try {
+        assertEqual(win.hasAstrometricSolution, true, label + ": hasAstrometricSolution should be true");
+
+        var pt = win.celestialToImage(KOCHAB_RA, KOCHAB_DEC);
+        assertTrue(pt !== null, label + ": celestialToImage returned null");
+        log("  " + label + ": celestialToImage(Kochab) = ("
+            + pt.x.toFixed(2) + ", " + pt.y.toFixed(2) + ")");
+
+        var image = win.mainView.image;
+        var ch = 1; // G channel
+        var cx = pt.x;
+        var cy = pt.y;
+        var r  = STAR_APERTURE;
+
+        // Aperture pixels (same PCL pixel-center convention as aperturePhotometry).
+        var apVals = [];
+        var yLo = Math.floor(cy - r) - 1, yHi = Math.ceil(cy + r) + 1;
+        var xLo = Math.floor(cx - r) - 1, xHi = Math.ceil(cx + r) + 1;
+        for (var y = yLo; y <= yHi; y++) {
+            if (y < 0 || y >= image.height) continue;
+            for (var x = xLo; x <= xHi; x++) {
+                if (x < 0 || x >= image.width) continue;
+                var dx = (x + 0.5) - cx;
+                var dy = (y + 0.5) - cy;
+                if (Math.sqrt(dx * dx + dy * dy) <= r) apVals.push(image.sample(x, y, ch));
+            }
+        }
+
+        // Background annulus (same r_in/r_out as aperturePhotometry's default aperture).
+        var rIn = r + 5, rOut = r + 25;
+        var ringVals = [];
+        var ryLo = Math.floor(cy - rOut) - 1, ryHi = Math.ceil(cy + rOut) + 1;
+        var rxLo = Math.floor(cx - rOut) - 1, rxHi = Math.ceil(cx + rOut) + 1;
+        for (var y = ryLo; y <= ryHi; y++) {
+            if (y < 0 || y >= image.height) continue;
+            for (var x = rxLo; x <= rxHi; x++) {
+                if (x < 0 || x >= image.width) continue;
+                var dx = (x + 0.5) - cx;
+                var dy = (y + 0.5) - cy;
+                var dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist >= rIn && dist <= rOut) ringVals.push(image.sample(x, y, ch));
+            }
+        }
+
+        assertTrue(apVals.length > 0,   label + ": no aperture pixels sampled");
+        assertTrue(ringVals.length > 0, label + ": no background ring pixels sampled");
+
+        var maxVal = apVals[0];
+        for (var i = 1; i < apVals.length; i++) {
+            if (apVals[i] > maxVal) maxVal = apVals[i];
+        }
+        var bgMedian = median(ringVals);
+
+        log("  " + label + ": max=" + maxVal.toFixed(5)
+            + " bgMedian=" + bgMedian.toFixed(5) + " diff=" + (maxVal - bgMedian).toFixed(5));
+        assertTrue(maxVal - bgMedian >= 0.5, label + ": max aperture value ("
+            + maxVal.toFixed(5) + ") should exceed background median ("
+            + bgMedian.toFixed(5) + ") by >= 0.5 — projected position should land on the star");
+    } finally {
+        win.forceClose();
+    }
+}
 
 // ============================================================
-// Load WCS from the 1s frame
+// Off-center stars: celestialToImage() vs. a significant-pixels-only centroid
 // ============================================================
-var wcs = null;
+// Kochab sits close to the frame center, where the retired linear TAN
+// approximation was already fairly accurate (its error grows with distance
+// from the tangent point), and where a flipped y axis barely moves anything
+// (a flip maps y -> H-y, which is close to y itself when y is close to H/2).
+// Neither the retired implementation nor a flipped y axis can be told apart
+// from a correct one using only a star on the vertical center line. So this
+// uses three isolated, unsaturated stars (SIMBAD J2000), one off to the side
+// and one near each vertical edge:
+// FIXTURE NOTE: the 6 Kochab fixtures had their pixel rows flipped vertically
+// relative to their own astrometric solution (they were re-saved the day after
+// capture). On 2026-09-30 the pixels were flipped back with
+// Image.mirrorVertical(), leaving the solution untouched (the originals are
+// kept in tests/fixtures/xisf/_flipped_backup/ on the signing machine). If the
+// fixtures are ever re-created from the flipped copies, the top/bottom-edge
+// stars below will fail — that is the fixture, not the code. See issue #22.
+var TEST_STARS = [
+    {
+        // V=6.681. No other V-magnitude star within 3' per SIMBAD. Projects to
+        // (370,1414) — ~1700px to the left of the frame center (4144x2822,
+        // center (2072,1411)), about 68% of the way to a corner. Measured
+        // directly against the retired formula (its CRPIX/CRVAL/CD read from
+        // the XISF header, before removal) it was projected 84px away from
+        // where celestialToImage() puts it.
+        name: "HD 136919",
+        ra:  229.34424277666997,
+        dec: 74.04514025971
+    },
+    {
+        // V=7.63. Projects to (2108,356) — near the TOP edge (~356px from
+        // it), with x close to the frame's x-center (2072), which isolates
+        // the y axis from any x-direction effect.
+        name: "HD 131710",
+        ra:  222.58576789384,
+        dec: 73.02778114665
+    },
+    {
+        // V=7.99. Projects to (791,2715) — near the BOTTOM edge (~107px
+        // from it).
+        name: "TW UMi",
+        ra:  228.21212036959997,
+        dec: 75.47114969322
+    }
+];
 
-test("readFrameMetadata: WCS present in 1s frame", function() {
-    var meta = readFrameMetadata(FRAME_1S);
-    assertTrue(meta !== null, "readFrameMetadata returned null");
-    assertTrue(meta.wcs !== null, "WCS should be present in plate-solved XISF");
-    wcs = meta.wcs;
-    console.writeln("  CRPIX1=" + wcs.crpix1.toFixed(1) + " CRPIX2=" + wcs.crpix2.toFixed(1));
-    console.writeln("  CRVAL1=" + wcs.crval1.toFixed(4) + " CRVAL2=" + wcs.crval2.toFixed(4));
-    console.writeln("  CD1_1=" + wcs.cd11.toFixed(6) + " CD2_2=" + wcs.cd22.toFixed(6));
+// Background stats (mean, std) from a sigma-clipped annulus — std, not MAD,
+// since the centroid below needs a real per-pixel noise estimate.
+function backgroundStats(image, ch, cx, cy, rIn, rOut) {
+    var vals = [];
+    var yLo = Math.floor(cy - rOut) - 1, yHi = Math.ceil(cy + rOut) + 1;
+    var xLo = Math.floor(cx - rOut) - 1, xHi = Math.ceil(cx + rOut) + 1;
+    for (var y = yLo; y <= yHi; y++) {
+        if (y < 0 || y >= image.height) continue;
+        var py = y + 0.5;
+        for (var x = xLo; x <= xHi; x++) {
+            if (x < 0 || x >= image.width) continue;
+            var px = x + 0.5;
+            var dx = px - cx, dy = py - cy;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist >= rIn && dist <= rOut) vals.push(image.sample(x, y, ch));
+        }
+    }
+    if (vals.length === 0) return null;
+    return sigmaClippingStats(vals, 3.0, 10); // { median, mean, std, count }
+}
+
+// Centroid over pixels whose background-subtracted value exceeds 3*bgStd —
+// i.e. only pixels that are actually part of a detected source, not every
+// positive noise fluctuation in the window (a plain "subtract the background
+// and keep positive values" centroid is biased toward the window's own
+// center by symmetric noise, even with no star in the window at all).
+// Also returns the raw peak value, so the caller can require a minimum
+// detection significance separately.
+function significantPixelCentroid(image, ch, cx, cy, r, bgMean, bgStd) {
+    var wSum = 0, wxSum = 0, wySum = 0;
+    var peak = -1;
+    var nSig = 0;
+    var yLo = Math.floor(cy - r) - 1, yHi = Math.ceil(cy + r) + 1;
+    var xLo = Math.floor(cx - r) - 1, xHi = Math.ceil(cx + r) + 1;
+    for (var y = yLo; y <= yHi; y++) {
+        if (y < 0 || y >= image.height) continue;
+        var py = y + 0.5;
+        for (var x = xLo; x <= xHi; x++) {
+            if (x < 0 || x >= image.width) continue;
+            var px = x + 0.5;
+            var dx = px - cx, dy = py - cy;
+            if (dx * dx + dy * dy > r * r) continue;
+            var v = image.sample(x, y, ch);
+            if (v > peak) peak = v;
+            if (bgStd <= 0) continue;
+            var w = v - bgMean;
+            if (w <= 3 * bgStd) continue; // keep only >3sigma pixels
+            nSig++;
+            wSum  += w;
+            wxSum += w * px;
+            wySum += w * py;
+        }
+    }
+    if (peak < 0 || wSum <= 0) return null;
+    return { x: wxSum / wSum, y: wySum / wSum, peak: peak, nSig: nSig };
+}
+
+// Runs the significant-pixel centroid check at an explicit pixel center
+// (rather than a star's celestialToImage() position), so the mutation test
+// below can probe a deliberately wrong center without duplicating this logic.
+// Returns { sigma, diffX, diffY } or null (no pixels 3sigma above background
+// within the aperture at all).
+function centroidCheckAt(image, ch, cx, cy, r) {
+    var bg = backgroundStats(image, ch, cx, cy, r + 5, r + 25);
+    if (!bg || bg.count === 0) return null;
+    var result = significantPixelCentroid(image, ch, cx, cy, r, bg.mean, bg.std);
+    if (!result) return null;
+    var sigma = (bg.std > 0) ? (result.peak - bg.mean) / bg.std : NaN;
+    return { sigma: sigma, nSig: result.nSig, diffX: result.x - cx, diffY: result.y - cy };
+}
+
+// 3px: the residual between celestialToImage()'s position and each star's
+// actual pixel position (found via the significant-pixel centroid above) was
+// <= 3px for all three stars in both exposures.
+var CENTROID_TOLERANCE_PX = 3;
+// 10 sigma and >= 5 significant pixels: an empty window (no star) measured
+// up to 4.6 sigma on the flipped fixtures, so 5 sigma left only a 0.4 sigma
+// margin; the faintest real test star is 32 sigma. The pixel count keeps a
+// single hot pixel from passing.
+var MIN_DETECTION_SIGMA    = 10;
+var MIN_SIGNIFICANT_PIXELS = 5;
+
+// Shared by the real checks and the mutation tests. Returns
+// { ok, gate, reason } where gate is "none" | "sigma" | "pixels" | "tolerance" | "pass".
+function judgeCentroid(check) {
+    if (!check) return { ok: false, gate: "none", reason: "no pixels 3sigma above background" };
+    if (!(check.sigma >= MIN_DETECTION_SIGMA))
+        return { ok: false, gate: "sigma", reason: "sigma=" + check.sigma.toFixed(2) + " < " + MIN_DETECTION_SIGMA };
+    if (check.nSig < MIN_SIGNIFICANT_PIXELS)
+        return { ok: false, gate: "pixels", reason: "only " + check.nSig + " pixels > 3sigma (< " + MIN_SIGNIFICANT_PIXELS + ")" };
+    if (Math.abs(check.diffX) > CENTROID_TOLERANCE_PX || Math.abs(check.diffY) > CENTROID_TOLERANCE_PX)
+        return { ok: false, gate: "tolerance", reason: "diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ") exceeds " + CENTROID_TOLERANCE_PX + "px" };
+    return { ok: true, gate: "pass", reason: "sigma=" + check.sigma.toFixed(2) + " nSig=" + check.nSig
+        + " diff=(" + check.diffX.toFixed(2) + "," + check.diffY.toFixed(2) + ")" };
+}
+
+function assertProjectionMatchesCentroid(filepath, label, star) {
+    var wins = ImageWindow.open(filepath);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed: " + filepath);
+    var win = wins[0];
+    try {
+        assertEqual(win.hasAstrometricSolution, true, label + ": hasAstrometricSolution should be true");
+
+        var pt = win.celestialToImage(star.ra, star.dec);
+        assertTrue(pt !== null, label + ": celestialToImage returned null");
+        log("  " + label + ": " + star.name + " celestialToImage = ("
+            + pt.x.toFixed(2) + ", " + pt.y.toFixed(2) + ")");
+
+        var image = win.mainView.image;
+        var ch = 1; // G channel
+        var check = centroidCheckAt(image, ch, pt.x, pt.y, STAR_APERTURE);
+        assertTrue(check !== null, label + ": " + star.name
+            + " — no pixels 3sigma above background within the aperture (no detectable star at the projected position)");
+
+        var verdict = judgeCentroid(check);
+        log("  " + label + ": " + star.name + " " + verdict.reason);
+        assertTrue(verdict.ok, label + ": " + star.name + " — " + verdict.reason);
+    } finally {
+        win.forceClose();
+    }
+}
+
+for (var _si = 0; _si < TEST_STARS.length; _si++) {
+    (function(star) {
+        test(star.name + ": celestialToImage matches significant-pixel centroid — 1s frame", function() {
+            assertProjectionMatchesCentroid(FRAME_1S, "1s", star);
+        });
+        test(star.name + ": celestialToImage matches significant-pixel centroid — 10s frame", function() {
+            assertProjectionMatchesCentroid(FRAME_10S, "10s", star);
+        });
+    })(TEST_STARS[_si]);
+}
+
+// Mutation test: a centroid check that only looks for *some* signal above
+// background, with no minimum significance, would still "pass" on pure noise
+// when centered 84px away from the real star (this repo's measured retired-
+// implementation error for HD 136919, see TEST_STARS above) — the noise
+// above the background threshold is roughly symmetric around any window
+// center, including a wrong one, so the centroid lands back on the window
+// center by construction. Confirm the actual check above doesn't do that:
+// shifting HD 136919's projected position by (84, 0) must make it fail,
+// either by finding no 3sigma signal, by failing the 5sigma detection
+// requirement, or by landing outside the tolerance.
+// Runs the centroid check at HD 136919's projection shifted by (dx, dy) on the
+// 10s frame and returns the verdict.
+function judgeShifted(dx, dy) {
+    var wins = ImageWindow.open(FRAME_10S);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
+    var win = wins[0];
+    try {
+        var star = TEST_STARS[0]; // HD 136919
+        var pt = win.celestialToImage(star.ra, star.dec);
+        assertTrue(pt !== null, "celestialToImage returned null");
+        var check = centroidCheckAt(win.mainView.image, 1, pt.x + dx, pt.y + dy, STAR_APERTURE);
+        var verdict = judgeCentroid(check);
+        log("  shift=(" + dx + "," + dy + "): gate=" + verdict.gate + " " + verdict.reason);
+        return verdict;
+    } finally {
+        win.forceClose();
+    }
+}
+
+// Mutation 1: 84px off (the retired implementation's measured error for this
+// star). The star is outside the window, so the detection gates must reject it.
+test("mutation: centroid check must fail when the center is wrong by (84, 0)", function() {
+    var v = judgeShifted(84, 0);
+    assertTrue(!v.ok, "shifting the center by (84,0) should fail, but it passed: " + v.reason);
 });
 
-// ============================================================
-// Round-trip: pixel → RA/Dec → pixel (CRPIX should map to CRVAL)
-// ============================================================
-// CRPIX is a FITS 1-indexed coordinate.
-// PixInsight pixel corresponding to CRPIX:
-//   px_pi = crpix1 - 1          (x: FITS 1-indexed → PixInsight 0-indexed)
-//   py_pi = imageHeight - crpix2 (y: FITS y-up → PixInsight y-down)
-test("pixelToRaDec(CRPIX) returns CRVAL", function() {
-    assertTrue(wcs !== null, "WCS not loaded (previous test failed)");
-    var crPixPx = wcs.crpix1 - 1;
-    var crPixPy = wcs.imageHeight - wcs.crpix2;
-    var pos = pixelToRaDec(wcs, crPixPx, crPixPy);
-    assertTrue(pos !== null, "pixelToRaDec returned null");
-    console.writeln("  CRPIX in PI coords: px=" + crPixPx.toFixed(1) + " py=" + crPixPy.toFixed(1));
-    console.writeln("  pixelToRaDec(CRPIX): RA=" + pos.ra.toFixed(4) + " Dec=" + pos.dec.toFixed(4));
-    assertEqual(pos.ra,  wcs.crval1, "RA at CRPIX should equal CRVAL1",  0.01);
-    assertEqual(pos.dec, wcs.crval2, "Dec at CRPIX should equal CRVAL2", 0.01);
+// Mutation 2: 6px off. The star stays inside the window (still detected), so
+// only the 3px tolerance can reject it. Without this, a centroid that always
+// returned the window center would pass every other test. 6px is also about
+// what a vertical flip does to a star on the center line (HD 136919, Kochab).
+test("mutation: 3px tolerance must reject a (6, 0) offset with the star still detected", function() {
+    var v = judgeShifted(6, 0);
+    assertEqual(v.gate, "tolerance", "a (6,0) shift should be rejected by the tolerance gate (" + v.reason + ")");
 });
 
-test("raDecToPixel(CRVAL) returns CRPIX", function() {
-    assertTrue(wcs !== null, "WCS not loaded (previous test failed)");
-    var px = raDecToPixel(wcs, wcs.crval1, wcs.crval2);
-    assertTrue(px !== null, "raDecToPixel returned null");
-    console.writeln("  raDecToPixel(CRVAL): px=" + px.px.toFixed(1) + " py=" + px.py.toFixed(1));
-    // Expected PixInsight pixel for CRPIX:
-    //   px_expected = round(crpix1 - 1),  py_expected = round(imageHeight - crpix2)
-    var expPx = Math.round(wcs.crpix1 - 1);
-    var expPy = Math.round(wcs.imageHeight - wcs.crpix2);
-    assertEqual(px.px, expPx, "px at CRVAL should equal CRPIX1 - 1", 1.0);
-    assertEqual(px.py, expPy, "py at CRVAL should equal imageHeight - CRPIX2", 1.0);
+
+// Auxiliary: Kochab sits near the tangent point, so this only confirms a star
+// is roughly where celestialToImage() says — see TEST_STARS above for the
+// tests that can actually tell a wrong implementation from a correct one.
+test("celestialToImage(Kochab) lands on the star — 1s frame", function() {
+    assertStarAtProjectedPosition(FRAME_1S, "1s");
 });
 
-// ============================================================
-// Round-trip: arbitrary pixel → RA/Dec → pixel
-// ============================================================
-test("raDecToPixel(pixelToRaDec(px)) round-trip", function() {
-    assertTrue(wcs !== null, "WCS not loaded (previous test failed)");
-    var origX = 500;
-    var origY = 800;
-    var pos = pixelToRaDec(wcs, origX, origY);
-    assertTrue(pos !== null, "pixelToRaDec returned null");
-    var back = raDecToPixel(wcs, pos.ra, pos.dec);
-    assertTrue(back !== null, "raDecToPixel returned null");
-    console.writeln("  orig=(" + origX + "," + origY + ")"
-        + "  pos=(" + pos.ra.toFixed(4) + "," + pos.dec.toFixed(4) + ")"
-        + "  back=(" + back.px.toFixed(1) + "," + back.py.toFixed(1) + ")");
-    assertEqual(back.px, origX, "round-trip X", 1.0);
-    assertEqual(back.py, origY, "round-trip Y", 1.0);
+test("celestialToImage(Kochab) lands on the star — 10s frame", function() {
+    assertStarAtProjectedPosition(FRAME_10S, "10s");
+});
+
+// Auxiliary: imageToCelestial() -> celestialToImage() should round-trip within 0.1 px.
+test("imageToCelestial / celestialToImage round-trip within 0.1 px", function() {
+    var wins = ImageWindow.open(FRAME_1S);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
+    var win = wins[0];
+    try {
+        var origX = 500, origY = 800;
+        var celestial = win.imageToCelestial(origX, origY);
+        assertTrue(celestial !== null, "imageToCelestial returned null");
+        var back = win.celestialToImage(celestial.x, celestial.y);
+        assertTrue(back !== null, "celestialToImage returned null");
+        log("  orig=(" + origX + "," + origY + ")"
+            + "  celestial=(" + celestial.x.toFixed(4) + "," + celestial.y.toFixed(4) + ")"
+            + "  back=(" + back.x.toFixed(2) + "," + back.y.toFixed(2) + ")");
+        assertEqual(back.x, origX, "round-trip X", 0.1);
+        assertEqual(back.y, origY, "round-trip Y", 0.1);
+    } finally {
+        win.forceClose();
+    }
 });
 
 runAllTests(RESULT_PATH);

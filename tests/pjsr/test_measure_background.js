@@ -1,3 +1,4 @@
+#engine v8
 // test_measure_background.js
 // PJSR test: measureBackground() and computeLSky()
 // Uses Kochab test frames (2026-03-27). Background ROI from kochab log: (2922, 1519).
@@ -52,7 +53,7 @@ test("measureBackground: ADU scales linearly with exptime (8s / 1s ≈ 8)", func
     var bg8 = measureBackground(FIXTURE_DIR + FRAMES[4].file, BG_X, BG_Y, meta8.bitsPerSample, "G");
     assertTrue(bg1 !== null && bg8 !== null, "measureBackground returned null");
     var ratio = bg8.adu_sky / bg1.adu_sky;
-    console.writeln("  bg1=" + bg1.adu_sky.toFixed(1) + "  bg8=" + bg8.adu_sky.toFixed(1) + "  ratio=" + ratio.toFixed(2));
+    log("  bg1=" + bg1.adu_sky.toFixed(1) + "  bg8=" + bg8.adu_sky.toFixed(1) + "  ratio=" + ratio.toFixed(2));
     assertTrue(ratio > 5.0 && ratio < 11.0, "8s/1s ADU ratio should be ~8, got " + ratio.toFixed(2));
 });
 
@@ -69,7 +70,7 @@ test("computeLSky: R² > 0.99 with 6 Kochab frames", function() {
         skyFrames.push({ exptime: meta.exptime, adu_sky: bg.adu_sky });
     }
     var sky = computeLSky(skyFrames);
-    console.writeln("  L_sky=" + sky.L_sky.toFixed(2) + "  R²=" + sky.r2.toFixed(5));
+    log("  L_sky=" + sky.L_sky.toFixed(2) + "  R²=" + sky.r2.toFixed(5));
     assertTrue(sky.L_sky > 0,  "L_sky should be positive");
     assertTrue(sky.r2  > 0.99, "R²_sky should be > 0.99, got " + sky.r2.toFixed(5));
 });
