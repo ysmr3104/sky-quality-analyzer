@@ -54,4 +54,20 @@ test("readFrameMetadata: hasWcs=true for plate-solved XISF", function() {
     assertEqual(meta.hasWcs, true, "hasWcs should be true for a plate-solved WBPP frame");
 });
 
+// ============================================================
+// readFrameMetadata: isReal / isCfa
+// ============================================================
+test("readFrameMetadata: isCfa=false for debayered 3-channel XISF (BAYERPAT may remain)", function() {
+    var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[0].file);
+    assertTrue(meta !== null, "readFrameMetadata returned null");
+    assertEqual(meta.isCfa, false, "debayered 3-channel frame must not be flagged as CFA");
+});
+
+test("readFrameMetadata: isReal=true for the floating-point Kochab frames", function() {
+    var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[0].file);
+    assertTrue(meta !== null, "readFrameMetadata returned null");
+    log("  isReal=" + meta.isReal + "  bitsPerSample=" + meta.bitsPerSample);
+    assertEqual(meta.isReal, true, "isReal should be true");
+});
+
 runAllTests(RESULT_PATH);
