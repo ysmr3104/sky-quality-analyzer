@@ -150,6 +150,8 @@ test("aperturePhotometry: saturated pixels included in flux sum (issue #13)", fu
     var cy = ap.starY;
     var independentSum   = 0;
     var independentCount = 0;
+    var independentSat   = 0; // counted here on the normalized value, not via maxADU
+
     try {
         var yLo = Math.floor(cy - APERTURE) - 1;
         var yHi = Math.ceil(cy + APERTURE) + 1;
@@ -165,7 +167,9 @@ test("aperturePhotometry: saturated pixels included in flux sum (issue #13)", fu
                 var dy = py - cy;
                 if (dx * dx + dy * dy <= APERTURE * APERTURE) {
                     independentCount++;
-                    independentSum += image2.sample(x, y, ch) * maxADU;
+                    var v = image2.sample(x, y, ch);
+                    if (v >= 0.97) independentSat++; // SAT_THRESHOLD as a normalized value
+                    independentSum += v * maxADU;
                 }
             }
         }
@@ -174,6 +178,9 @@ test("aperturePhotometry: saturated pixels included in flux sum (issue #13)", fu
     }
 
     var independentNetFlux = independentSum - ap.skyBg * independentCount;
+    log("  independent: saturated=" + independentSat + "  (aperturePhotometry: " + ap.saturated_pixels + ")");
+    assertEqual(ap.saturated_pixels, independentSat,
+        "saturated_pixels should equal an independent count of pixels >= 0.97 (normalized)");
     log("  independent: count=" + independentCount + "  sum=" + independentSum.toFixed(1)
         + "  netFlux=" + independentNetFlux.toFixed(1));
     assertEqual(ap.adu_star, independentNetFlux, "adu_star should equal independently-summed "

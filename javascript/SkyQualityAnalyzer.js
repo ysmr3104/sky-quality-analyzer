@@ -1179,22 +1179,31 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    // Linearity check (warning only, not an exclusion — see RATE_DEV_WARN comment above):
    // for frames used in the L_star fit, adu_star/exptime should be a constant rate.
    // Flag frames whose rate deviates from the median rate by more than RATE_DEV_WARN.
+   // Non-finite rates (e.g. a star projected outside the image gives NaN flux)
+   // are left out: median() does not reject NaN and would return a meaningless
+   // value, flagging the healthy frames instead.
    var usedRates = [];
    for (var k = 0; k < frameResults.length; k++) {
       if (frameResults[k].used) {
-         usedRates.push(frameResults[k].adu_star / frameResults[k].exptime);
+         var r = frameResults[k].adu_star / frameResults[k].exptime;
+         if (isFinite(r)) usedRates.push(r);
       }
    }
-   var rateMedian = (usedRates.length > 0) ? median(usedRates) : NaN;
+   // With fewer than 2 usable frames there is no fit, so nothing to compare.
+   // A median at or below zero (no star at the position, over-subtracted sky)
+   // would make every deviation huge or flip its sign, so skip the check too.
+   var fitPerformed = (usedRates.length >= 2);
+   var rateMedian = fitPerformed ? median(usedRates) : NaN;
    var nonlinearFrames = [];
    for (var k = 0; k < frameResults.length; k++) {
-      if (!frameResults[k].used || usedRates.length === 0 || rateMedian === 0) {
+      frameResults[k].fit_performed = fitPerformed;
+      var rateK = frameResults[k].adu_star / frameResults[k].exptime;
+      if (!frameResults[k].used || !fitPerformed || !(rateMedian > 0) || !isFinite(rateK)) {
          frameResults[k].rate_deviation = null;
          frameResults[k].nonlinear = false;
          continue;
       }
-      var rate = frameResults[k].adu_star / frameResults[k].exptime;
-      var dev  = rate / rateMedian - 1;
+      var dev  = rateK / rateMedian - 1;
       frameResults[k].rate_deviation = dev;
       frameResults[k].nonlinear = (Math.abs(dev) > RATE_DEV_WARN);
       if (frameResults[k].nonlinear) {
@@ -1837,7 +1846,8 @@ constructor() {
                var fd = frameData[j];
                var satPct = (fd.saturated_fraction * 100).toFixed(1);
                var satPx  = fd.saturated_pixels || 0;
-               var status = !fd.used ? "Sat" : (fd.nonlinear ? "Nonlin" : "OK");
+               // "No fit": the frame is usable, but too few frames were left for a fit.
+               var status = !fd.used ? "Sat" : (!fd.fit_performed ? "No fit" : (fd.nonlinear ? "Nonlin" : "OK"));
                node.setText(4, isNaN(fd.adu_star) ? "\u2014" : Math.round(fd.adu_star).toString());
                node.setText(5, satPct + "% (" + satPx + ")");
                node.setText(6, status);
