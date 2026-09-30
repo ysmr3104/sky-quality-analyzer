@@ -1,9 +1,13 @@
 #engine v8
 // test_aperture_photometry.js
-// PJSR test: aperturePhotometry() accepts a fractional star center.
-// A 0.3 px shift in the center should change the measured flux by <= 2%.
-// Since issue #22 the center is re-centroided on the star before measuring
-// (refineStarCenter), so the tests below also cover that.
+// PJSR test: aperturePhotometry() and refineStarCenter().
+// Since issue #22 the center is re-centroided on the star before measuring, so a
+// 0.3 px shift of the starting point no longer reaches the aperture sum; the
+// first test only checks that both starts converge to the same center and flux.
+// How fractional centers enter the aperture sum is guarded by the independent
+// re-summation in the saturation test below.
+// refineStarCenter is checked against a synthetic donut with a known center
+// (the tests on the real frames only compare the algorithm with itself).
 //
 // Run:
 //   bash tests/pjsr/run_pjsr_tests.sh tests/pjsr/test_aperture_photometry.js
@@ -29,7 +33,7 @@ var FRAME_10S = FIXTURE_DIR +
 
 var APERTURE = 15;
 
-test("aperturePhotometry: flux changes <= 2% for a 0.3 px center shift", function() {
+test("aperturePhotometry: starting 0.3 px apart gives the same center and flux (<= 2%)", function() {
     var meta = readFrameMetadata(FRAME_10S);
     assertTrue(meta !== null, "readFrameMetadata returned null");
 
@@ -66,7 +70,7 @@ test("aperturePhotometry: flux changes <= 2% for a 0.3 px center shift", functio
     log("  flux(int)=" + apInt.adu_star.toFixed(1)
         + "  flux(+0.3px)=" + apShifted.adu_star.toFixed(1)
         + "  diff=" + diffPct.toFixed(3) + "%");
-    assertTrue(diffPct <= 2.0, "flux difference for a 0.3 px center shift should be <= 2%, got "
+    assertTrue(diffPct <= 2.0, "flux difference for starts 0.3 px apart should be <= 2%, got "
         + diffPct.toFixed(3) + "%");
 });
 
@@ -242,10 +246,13 @@ test("refineStarCenter: HD 136919 offset by (+4, -3) px lands where the unshifte
     assertTrue(d <= 0.5, "refined centers should agree within 0.5 px, got " + d.toFixed(3));
 });
 
-test("refineStarCenter: HD 136919 offset by (+20, 0) px (star outside the window) is not refined", function() {
+test("refineStarCenter: HD 136919 offset by (+20, 0) px is not refined (code too_far)", function() {
     var r = refineAt(HD_RA, HD_DEC, 20, 0);
     log("  (+20,0)  : " + fmtRes(r.res) + "  projected=(" + r.proj.x.toFixed(3) + ", " + r.proj.y.toFixed(3) + ")");
     assertTrue(r.res.refined === false, "should not be refined");
+    // At +20 px the star lies in the far part of the window: it is detected (so not
+    // "no_star"), but its centroid is > aperture / 2 from the start (so "too_far").
+    assertEqual(r.res.code, "too_far", "code should be too_far");
     assertTrue(typeof r.res.reason === "string" && r.res.reason.length > 0, "a reason should be given");
     assertEqual(r.res.x, r.proj.x + 20, "x should stay at the input position", 1e-9);
     assertEqual(r.res.y, r.proj.y, "y should stay at the input position", 1e-9);
@@ -294,6 +301,96 @@ test("aperturePhotometry: all Kochab frames are re-centered by <= 3 px", functio
         assertTrue(ap.centroidRefined === true, "should be re-centered: " + names[i] + " reason: " + ap.centroidReason);
         assertTrue(ap.centroidShift <= 3, "shift should be <= 3 px, got " + ap.centroidShift.toFixed(2));
     }
+});
+
+// ============================================================
+// Synthetic donut with a known fractional center (independent ground truth)
+// ============================================================
+var SYN_W = 200, SYN_H = 160;
+var SYN_CX = 100.37, SYN_CY = 80.61;
+var SYN_BG = 0.10, SYN_RING = 0.40, SYN_NOISE = 0.002;
+
+// Seeded LCG so the image is reproducible; Box-Muller for Gaussian noise.
+function makeRng(seed) {
+    var state = seed;
+    function uni() {
+        state = (state * 1664525 + 1013904223) % 4294967296;
+        return (state + 0.5) / 4294967296;
+    }
+    return function() {
+        return Math.sqrt(-2 * Math.log(uni())) * Math.cos(2 * Math.PI * uni());
+    };
+}
+
+// Pixel (ix, iy) is evaluated at its center (ix + 0.5, iy + 0.5).
+function makeDonutImage(cx, cy, rIn, rOut) {
+    var img = new Image(SYN_W, SYN_H, 1);
+    var gauss = makeRng(12345);
+    for (var y = 0; y < SYN_H; y++) {
+        for (var x = 0; x < SYN_W; x++) {
+            var dx = x + 0.5 - cx;
+            var dy = y + 0.5 - cy;
+            var d2 = dx * dx + dy * dy;
+            var v = SYN_BG + SYN_NOISE * gauss();
+            if (d2 >= rIn * rIn && d2 <= rOut * rOut) v += SYN_RING;
+            img.setSample(v, x, y, 0);
+        }
+    }
+    return img;
+}
+
+test("refineStarCenter: synthetic donut, starts 0 / 3 / 7 px off, recovers the true center within 0.1 px", function() {
+    var img = makeDonutImage(SYN_CX, SYN_CY, 4, 10);
+    var offsets = [0, 3, 7];
+    for (var i = 0; i < offsets.length; i++) {
+        // Diagonal-ish direction (0.6, -0.8) so both axes are off
+        var sx = SYN_CX + 0.6 * offsets[i];
+        var sy = SYN_CY - 0.8 * offsets[i];
+        var r = refineStarCenter(img, 0, sx, sy, APERTURE);
+        var err = Math.sqrt(Math.pow(r.x - SYN_CX, 2) + Math.pow(r.y - SYN_CY, 2));
+        log("  synthetic start " + offsets[i] + " px off: " + fmtRes(r) + " code=" + r.code
+            + " converged=" + r.converged + "  error vs truth=" + err.toFixed(4) + " px");
+        assertTrue(r.refined === true, "offset " + offsets[i] + ": should be refined, reason: " + r.reason);
+        assertTrue(err <= 0.1, "offset " + offsets[i] + ": error vs true center should be <= 0.1 px, got " + err.toFixed(4));
+    }
+});
+
+test("refineStarCenter: synthetic donut, start where only the far rim is inside the window -> too_far", function() {
+    var img = makeDonutImage(SYN_CX, SYN_CY, 4, 10);
+    // Scan a few offsets along +x and log the code of each (the assert is on 20 px:
+    // the window then holds only the far side of the ring, whose centroid is more
+    // than aperture / 2 from the start).
+    var offs = [10, 14, 17, 20, 22];
+    for (var i = 0; i < offs.length; i++) {
+        var r = refineStarCenter(img, 0, SYN_CX + offs[i], SYN_CY, APERTURE);
+        log("  synthetic start +" + offs[i] + " px: refined=" + r.refined + " code=" + r.code + " shift=" + r.shift.toFixed(3));
+        if (offs[i] === 20) {
+            assertTrue(r.refined === false, "should not be refined");
+            assertEqual(r.code, "too_far", "code should be too_far");
+            assertEqual(r.x, SYN_CX + 20, "x should stay at the start", 1e-9);
+            assertEqual(r.y, SYN_CY, "y should stay at the start", 1e-9);
+        }
+    }
+});
+
+test("refineStarCenter: synthetic donut, a second star near the start wins (nearest star is followed)", function() {
+    // Star A at the true center, star B 11 px to the right. Starting on B's
+    // center converges to B, not to A (A's ring is partly in the window, but B dominates).
+    var img = makeDonutImage(SYN_CX, SYN_CY, 4, 10);
+    var gauss = makeRng(999);
+    var bx = SYN_CX + 40, by = SYN_CY; // far enough that A never enters B's window
+    for (var y = 0; y < SYN_H; y++) {
+        for (var x = 0; x < SYN_W; x++) {
+            var dx = x + 0.5 - bx, dy = y + 0.5 - by;
+            var d2 = dx * dx + dy * dy;
+            if (d2 >= 16 && d2 <= 100) img.setSample(img.sample(x, y, 0) + SYN_RING, x, y, 0);
+        }
+    }
+    var r = refineStarCenter(img, 0, bx + 2, by - 1, APERTURE);
+    var err = Math.sqrt(Math.pow(r.x - bx, 2) + Math.pow(r.y - by, 2));
+    log("  second star: " + fmtRes(r) + "  error vs B=" + err.toFixed(4));
+    assertTrue(r.refined === true, "should be refined");
+    assertTrue(err <= 0.1, "should converge to B within 0.1 px, got " + err.toFixed(4));
 });
 
 runAllTests(RESULT_PATH);

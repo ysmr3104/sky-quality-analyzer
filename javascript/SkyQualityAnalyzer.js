@@ -1015,11 +1015,16 @@ function measureBackground(filepath, bgX, bgY, sqmChannel) {
 // The projected (plate solution) or clicked position can be off by several
 // pixels — solution error, a hand that wobbled, a fixture that was flipped.
 // Whatever the cause, re-centroid on the star before measuring it.
-// Returns { x, y, refined, shift, reason }
+// Returns { x, y, refined, shift, reason, code, converged }
 // - refined: false when no star was found or the center would have moved too
 //   far (probably a different star); x/y are then the input position.
 // - shift: distance from the input position [px].
 // - reason: why it was not refined (English, for the operator), else null.
+// - code: null when refined, else "no_star" (detection gate not met), "too_far"
+//   (a star was found but the center would move more than aperture / 2 — maybe
+//   a different star) or "edge" (not enough sky pixels near the image edge).
+// - converged: the last step was under CENTROID_CONVERGE_PX (false when the
+//   iteration limit stopped it, or when not refined).
 // Saturated stars are fine: the flat-topped core is symmetric.
 //============================================================================
 
@@ -1032,6 +1037,8 @@ function refineStarCenter(image, ch, cx, cy, aperture) {
    var curY = cy;
    var found = false;
    var lastReason = null;
+   var lastCode = null;
+   var converged = false;
 
    for (var iter = 0; iter < CENTROID_MAX_ITER; iter++) {
       // Sky around the current center (mean and std, sigma-clipped)
@@ -1052,6 +1059,7 @@ function refineStarCenter(image, ch, cx, cy, aperture) {
       }
       if (sky.length < 10) {
          lastReason = "The selected position is too close to the image edge to measure the sky.";
+         lastCode = "edge";
          break;
       }
       var st = sigmaClippingStats(sky, 3.0, 10);
@@ -1077,6 +1085,7 @@ function refineStarCenter(image, ch, cx, cy, aperture) {
       var c = significantPixelCentroid(pix, st.mean, st.std);
       if (!c.ok) {
          lastReason = c.reason;
+         lastCode = "no_star";
          break;
       }
       var mdx = c.x - x0;
@@ -1086,6 +1095,7 @@ function refineStarCenter(image, ch, cx, cy, aperture) {
          lastReason = "The star found near the selected position is more than "
             + (aperture * CENTROID_MAX_SHIFT_FRAC).toFixed(1)
             + " px away — it may be a different star, so the position was not corrected.";
+         lastCode = "too_far";
          break;
       }
       var step = Math.sqrt((c.x - curX) * (c.x - curX) + (c.y - curY) * (c.y - curY));
@@ -1093,15 +1103,17 @@ function refineStarCenter(image, ch, cx, cy, aperture) {
       curY = c.y;
       found = true;
       lastReason = null;
-      if (step < CENTROID_CONVERGE_PX) break;
+      lastCode = null;
+      if (step < CENTROID_CONVERGE_PX) { converged = true; break; }
    }
 
    if (!found) {
-      return { x: x0, y: y0, refined: false, shift: 0, reason: lastReason };
+      return { x: x0, y: y0, refined: false, shift: 0, reason: lastReason, code: lastCode, converged: false };
    }
    var sx = curX - x0;
    var sy = curY - y0;
-   return { x: curX, y: curY, refined: true, shift: Math.sqrt(sx * sx + sy * sy), reason: null };
+   return { x: curX, y: curY, refined: true, shift: Math.sqrt(sx * sx + sy * sy),
+            reason: null, code: null, converged: converged };
 }
 
 //============================================================================
@@ -1235,6 +1247,8 @@ function aperturePhotometry(filepath, starX, starY, aperture, sqmChannel, starRa
          centroidShift:       refine.shift,
          centroidRefined:     refine.refined,
          centroidReason:      refine.reason,
+         centroidCode:        refine.code,
+         centroidConverged:   refine.converged,
          skyBg:               skyBg
       };
    } finally {
@@ -1258,7 +1272,8 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    var frameResults  = [];  // per-frame data for UI display
    var measuredFrames = []; // frames that actually went into this result (for CSV export)
    var centroidShiftedFrames = [];  // star position corrected by more than CENTROID_WARN_SHIFT_PX
-   var centroidFailedFrames  = [];  // no star found around the selected position
+   var centroidFailedFrames  = [];  // no star found around the selected position (or too close to the edge)
+   var centroidFarFrames     = [];  // a star was found but too far away to trust (measured at the selected position)
 
    for (var i = 0; i < frames.length; i++) {
       var f  = frames[i];
@@ -1281,14 +1296,23 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       console.writeln(format("  %-40s  t=%5.1fs  bg=%8.1f ADU  star=%11.0f ADU  sat=%2d%% (%d px)  starXY=(%.1f,%.1f)  %s",
          f.filename, f.exptime, bg.adu_sky, ap.adu_star, satPct, ap.saturated_pixels || 0, ap.starX, ap.starY,
          ap.centroidRefined ? ("re-centered " + ap.centroidShift.toFixed(1) + " px")
-                            : "not re-centered (no star found)"));
+            : (ap.centroidCode === "too_far" ? "not re-centered (star found more than "
+                  + (aperture * CENTROID_MAX_SHIFT_FRAC).toFixed(1) + " px away)"
+            : (ap.centroidCode === "edge" ? "not re-centered (too close to the edge)"
+                                          : "not re-centered (no star found)"))));
       if (!ap.centroidRefined && ap.centroidReason) {
          console.warningln("    " + ap.centroidReason);
+      }
+      if (ap.centroidRefined && !ap.centroidConverged) {
+         console.writeln("    Star center did not settle within " + CENTROID_MAX_ITER + " passes.");
       }
       if (ap.centroidRefined && ap.centroidShift > CENTROID_WARN_SHIFT_PX) {
          centroidShiftedFrames.push(f.filename);
       }
-      if (!ap.centroidRefined) centroidFailedFrames.push(f.filename);
+      if (!ap.centroidRefined) {
+         if (ap.centroidCode === "too_far") centroidFarFrames.push(f.filename);
+         else centroidFailedFrames.push(f.filename);
+      }
 
       measuredFrames.push({ filename: f.filename, exptime: f.exptime });
       skyFrameData.push({ exptime: f.exptime, adu_sky: bg.adu_sky });
@@ -1392,6 +1416,7 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       nonlinear_frames: nonlinearFrames,
       centroid_shifted_frames: centroidShiftedFrames,
       centroid_failed_frames:  centroidFailedFrames,
+      centroid_far_frames:     centroidFarFrames,
       frameData:        frameResults,
       sqmChannel:       sqmChannel,
       bgX:              bgX,
@@ -2306,8 +2331,13 @@ constructor() {
          warnings.push("Star position was corrected by more than " + CENTROID_WARN_SHIFT_PX + " px in: "
             + result.centroid_shifted_frames.join(", ") + " \u2014 check the plate solution or the selected star.");
       }
+      if (result.centroid_far_frames && result.centroid_far_frames.length > 0) {
+         warnings.push("A star was found more than " + (result.aperture * CENTROID_MAX_SHIFT_FRAC).toFixed(1)
+            + " px away from the selected position in: " + result.centroid_far_frames.join(", ")
+            + " \u2014 check the plate solution or the selected star (the measurement used the selected position, which may be off the star).");
+      }
       if (result.centroid_failed_frames && result.centroid_failed_frames.length > 0) {
-         warnings.push("Could not find the star around the selected position in: "
+         warnings.push("Could not find the star around the selected position (or it is too close to the image edge) in: "
             + result.centroid_failed_frames.join(", ") + " \u2014 the aperture may be off the star.");
       }
       this.resultWarningLabel.text = warnings.length > 0 ? "WARNING: " + warnings.join("  /  ") : "";
