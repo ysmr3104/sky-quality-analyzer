@@ -421,7 +421,8 @@ assert(c1.source === "wcs", "pixelScale: source is wcs");
 var c2 = math.choosePixelScale([0, 3.82, 0], [3.0, 3.0, 3.0], 3.0);
 assertClose(c2.scale, 3.82, 1e-9, "pixelScale: WCS on a single frame is still used");
 assert(c2.source === "wcs", "pixelScale: partial WCS -> wcs");
-assertClose(c2.spread, 0, 1e-12, "pixelScale: spread of one value is 0");
+assertClose(c2.spread, (3.82 - 3.0) / 3.82, 1e-9, "pixelScale: unsolved frames count with their header value in the spread");
+assertClose(math.choosePixelScale([3.82], [], 0).spread, 0, 1e-12, "pixelScale: spread of one value is 0");
 
 var c3 = math.choosePixelScale([0, 0], [2.75, 2.75, 0], 3.82);
 assertClose(c3.scale, 2.75, 1e-9, "pixelScale: header when no WCS");
@@ -446,6 +447,18 @@ assert(isNaN(c6.dbMismatch) && c6.source === "wcs", "pixelScale: dbMismatch NaN 
 // spread = (max - min) / median
 var c7 = math.choosePixelScale([3.8, 4.0, 3.9], [], 0);
 assertClose(c7.spread, 0.2 / 3.9, 1e-9, "pixelScale: spread = (max-min)/median");
+
+// even count: median is the mean of the two middle values
+var c8 = math.choosePixelScale([3.80, 3.84], [], 0);
+assertClose(c8.scale, 3.82, 1e-9, "pixelScale: median of an even count is the mean of the middle two");
+
+// One solved frame (3.82) among header-only frames of other equipment (2.75):
+// scale stays with the solved group, but the frames disagree.
+var c9 = math.choosePixelScale([3.82, 0, 0, 0, 0, 0], [3.82, 2.75, 2.75, 2.75, 2.75, 2.75], 0);
+assertClose(c9.scale, 3.82, 1e-9, "pixelScale: mixed solved / unsolved keeps the WCS value");
+assert(c9.source === "wcs", "pixelScale: mixed -> wcs");
+assertClose(c9.spread, (3.82 - 2.75) / 3.82, 1e-9, "pixelScale: spread compares each frame's best value");
+assert(c9.spread > W, "pixelScale: mixed equipment is flagged");
 
 // Threshold: just below / above 2%
 var below = math.choosePixelScale([3.82 * 1.019], [], 3.82);

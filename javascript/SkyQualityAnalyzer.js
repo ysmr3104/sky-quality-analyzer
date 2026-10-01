@@ -1762,7 +1762,14 @@ constructor() {
 
    equipGroupBox.sizer.add(camRow);
    equipGroupBox.sizer.add(teleRow);
+   // Warnings about the pixel scale: wrapped, and hidden when there is none.
+   this.pixelScaleWarningLabel = new Label(equipGroupBox);
+   this.pixelScaleWarningLabel.wordWrapping = true;
+   this.pixelScaleWarningLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
+   this.pixelScaleWarningLabel.visible = false;
+
    equipGroupBox.sizer.add(this.pixelScaleLabel);
+   equipGroupBox.sizer.add(this.pixelScaleWarningLabel);
 
    // =====================================================
    // Section 3: Measurement Settings
@@ -1842,7 +1849,7 @@ constructor() {
          return;
       }
       var ap = self.apertureSpinBox.value;
-      // Compute current pixel scale from selected equipment for NearbyStarDialog suitability column.
+      // Pixel scale of the session (plate solution, FITS header or selected equipment) for the NearbyStarDialog suitability column.
       var currentPs = self.currentPixelScale().scale;
       // Use longest-exposure frame with an astrometric solution (best SNR for star
       // identification). Fall back to longest-exposure frame without one if none are solved.
@@ -2194,8 +2201,9 @@ constructor() {
    if (!bgOk)         missing.push("Select a background region");
    if (!starOk)       missing.push("Select the reference star");
    if (!vmagOk)       missing.push("Enter the V magnitude");
-   // Same condition as the check at the start of runAnalysis(): "Custom" entries
-   // in equipment.json have pixel_pitch / focal_length = 0.
+   // No scale from the plate solution or the FITS header, and none from the
+   // selected equipment either ("Custom" entries in equipment.json have
+   // pixel_pitch / focal_length = 0). Same condition as in runAnalysis().
    if (!(this.currentPixelScale().scale > 0))
       missing.push("Pixel scale unknown: plate-solve the frames, or select a camera and telescope with a known pixel size and focal length");
    this.analyzeStatusLabel.text = (missing.length > 0) ? missing.join("  /  ") : "Ready";
@@ -2257,17 +2265,25 @@ constructor() {
 
    updatePixelScale() {
    var info = this.currentPixelScale();
+   var warns = [];
    if (!(info.scale > 0)) {
-      this.pixelScaleLabel.text = "Pixel Scale:  \u2014  arcsec/px  (plate-solve the frames, or select a camera and telescope with a known pixel size and focal length)";
-      return;
+      this.pixelScaleLabel.text = "Pixel Scale:  \u2014  arcsec/px  (unknown)";
+      warns.push("Plate-solve the frames, or select a camera and telescope with a known pixel size and focal length.");
+   } else {
+      var text = "Pixel Scale:  " + info.scale.toFixed(3) + " arcsec/px  (" + pixelScaleSourceText(info.source) + ")";
+      if (isFinite(info.dbMismatch)) {
+         text += "  [selected equipment: " + info.dbScale.toFixed(3) + " arcsec/px]";
+      }
+      this.pixelScaleLabel.text = text;
+      warns = pixelScaleWarnings(info);
    }
-   var text = "Pixel Scale:  " + info.scale.toFixed(3) + " arcsec/px  (" + pixelScaleSourceText(info.source) + ")";
-   if (isFinite(info.dbMismatch)) {
-      text += "  [selected equipment: " + info.dbScale.toFixed(3) + " arcsec/px]";
+   if (warns.length > 0) {
+      this.pixelScaleWarningLabel.text = "WARNING: " + warns.join("  /  ");
+      this.pixelScaleWarningLabel.visible = true;
+   } else {
+      this.pixelScaleWarningLabel.text = "";
+      this.pixelScaleWarningLabel.visible = false;
    }
-   var warns = pixelScaleWarnings(info);
-   for (var i = 0; i < warns.length; i++) text += "\nWARNING: " + warns[i];
-   this.pixelScaleLabel.text = text;
    }
 
    clearResults() {

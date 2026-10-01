@@ -139,16 +139,19 @@ test("readFrameMetadata: wcsPixelScale is about 3.82 arcsec/px for the Kochab fr
     }
 });
 
-test("readFrameMetadata: headerPixelScale agrees with wcsPixelScale within 2% when the header has XPIXSZ/FOCALLEN", function() {
-    var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[0].file);
-    assertTrue(meta !== null, "readFrameMetadata returned null");
-    if (!(meta.headerPixelScale > 0)) {
-        log("  fixture has no usable XPIXSZ/FOCALLEN: headerPixelScale=" + meta.headerPixelScale + " (nothing to compare)");
-        return;
+test("readFrameMetadata: wcsPixelScale and headerPixelScale agree (3.82 +-3%, mutual difference <= 2%) on all Kochab frames", function() {
+    // The fixtures carry XPIXSZ and FOCALLEN, so a header scale of 0 is a failure.
+    for (var i = 0; i < FIXTURES.length; i++) {
+        var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[i].file);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        assertTrue(meta.headerPixelScale > 0, FIXTURES[i].file + ": headerPixelScale is 0 (XPIXSZ / FOCALLEN not read)");
+        assertTrue(meta.wcsPixelScale > 0, FIXTURES[i].file + ": wcsPixelScale is 0");
+        var rel = Math.abs(meta.headerPixelScale - meta.wcsPixelScale) / meta.wcsPixelScale;
+        log("  " + FIXTURES[i].exptime + "s: header=" + meta.headerPixelScale + "  wcs=" + meta.wcsPixelScale + "  relative difference=" + rel);
+        assertEqual(meta.wcsPixelScale, 3.82, "wcsPixelScale", 3.82 * 0.03);
+        assertEqual(meta.headerPixelScale, 3.82, "headerPixelScale", 3.82 * 0.03);
+        assertTrue(rel <= 0.02, FIXTURES[i].file + ": header and WCS pixel scales differ by more than 2%");
     }
-    var rel = Math.abs(meta.headerPixelScale - meta.wcsPixelScale) / meta.wcsPixelScale;
-    log("  header=" + meta.headerPixelScale + "  wcs=" + meta.wcsPixelScale + "  relative difference=" + rel);
-    assertTrue(rel <= 0.02, "header and WCS pixel scales differ by more than 2%");
 });
 
 // XPIXSZ=2.0 um, FOCALLEN=150 mm, XBINNING=2, no astrometric solution:
