@@ -267,11 +267,11 @@ ADU_total = ADU_sky + ADU_bias + ADU_dark + ADU_stars
 |-----------|------|--------|------|
 | `ADU_sky` | ADU/px | 画像解析 | バックグラウンド輝度（中央値） |
 | `t_exp` | 秒 | FITS: `EXPTIME` | 露出時間 |
-| `pixel_scale` | arcsec/px | FITS: `PIXSCALE` または計算 | ピクセルスケール |
+| `pixel_scale` | arcsec/px | 天体位置の解 → `XPIXSZ` / `FOCALLEN` → 機材 DB（§8.8） | ピクセルスケール |
 | `Gain` | e⁻/ADU | FITS: `GAIN` またはカメラ仕様 | カメラゲイン |
 | `ZP` | mag | 測光較正 | ゼロ点等級 |
 | `Filter` | — | FITS: `FILTER` | 使用フィルター |
-| `Binning` | — | FITS: `XBINNING` | ビニング（ピクセルスケール補正に必要） |
+| `Binning` | — | FITS: `XBINNING` | ビニング（記録用。ピクセルスケールの計算には使わない。§8.8） |
 
 ### 5.2 露出時間（EXPTIME）
 
@@ -281,7 +281,7 @@ FITS ヘッダーの `EXPTIME` または `EXPOSURE` キーワードから取得�
 
 ピクセルスケールは 1 ピクセルが対応する天球上の角度（arcsec/px）です。
 
-FITS ヘッダーに `PIXSCALE` がある場合はそれを使用します。ない場合は以下の式で計算できます。
+天体位置の解があればそこから求め、なければ以下の式で計算します（優先順と理由は §8.8）。`PIXSCALE` キーワードは使いません。
 
 ```
 pixel_scale = (pixel_size_μm / focal_length_mm) × 206.265
@@ -625,7 +625,7 @@ L'_sky = L_sky / θ_pixel²
 pixel_scale_binned = pixel_scale_1x1 × n
 ```
 
-FITS ヘッダーの `XBINNING` / `YBINNING` から取得し、ピクセルスケールに乗算して補正します。
+本ツールは `XBINNING` を掛けません。天体位置の解から求めたスケールはビニング後の画素のものであり、`XPIXSZ` もビニング込みの値で書かれるため、掛けると二重になります（§8.8）。機材 DB から求めるときはビニング 1 とみなすので、ビニングした画像では天体位置の解か `XPIXSZ` / `FOCALLEN` が必要です。
 
 ---
 
@@ -901,9 +901,9 @@ color_type == "mono" の場合:
 | `aperture` | number | 口径 [mm] |
 | `f_ratio` | number | F 値 |
 
-ピクセルスケールは選択されたカメラとビニング設定から自動計算:
+天体位置の解も `XPIXSZ` / `FOCALLEN` も無いときは、選択されたカメラと望遠鏡から計算する（ビニング 1 とみなす。§8.8）:
 ```
-pixel_scale = (pixel_pitch × binning / focal_length) × 206.265
+pixel_scale = (pixel_pitch / focal_length) × 206.265
 ```
 
 ### 8.7 UI 設計
