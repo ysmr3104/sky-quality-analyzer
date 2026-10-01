@@ -219,6 +219,70 @@ function computePixelScale(pixel_pitch_um, focal_length_mm, binning) {
 }
 
 /**
+ * Relative difference above which two pixel scales are reported as disagreeing
+ * (selected equipment vs. image, or frames among themselves). SQM goes with
+ * 5*log10(scale), so 2% is about 0.04 mag.
+ */
+var PIXEL_SCALE_WARN_FRAC = 0.02;
+
+/**
+ * Pick the session pixel scale from the per-frame values.
+ * Priority: plate solution (wcs) > FITS header (header) > equipment database (db).
+ * A source is used as soon as one frame has a valid (finite, > 0) value; the
+ * scale is the median of that group.
+ * wcsScales[i] and headerScales[i] must belong to the same frame (same order).
+ * @param {number[]} wcsScales    - per-frame scale from the plate solution [arcsec/px] (0 = none)
+ * @param {number[]} headerScales - per-frame scale from XPIXSZ/FOCALLEN [arcsec/px] (0 = none)
+ * @param {number}   dbScale      - scale from the selected camera and telescope (0 = unknown)
+ * @returns {{scale: number, source: string, dbScale: number, dbMismatch: number, spread: number}}
+ *   source: "wcs" | "header" | "db" | "none".
+ *   dbMismatch: |scale - dbScale| / dbScale, NaN if dbScale is unknown or source is "db"/"none".
+ *   spread: (max - min) / scale over each frame's best value (its plate-solution
+ *           value if valid, else its header value; frames with neither are left out),
+ *           so frames with and without a solution are compared with each other.
+ *           0 for "db"/"none".
+ */
+function choosePixelScale(wcsScales, headerScales, dbScale) {
+    function valid(list) {
+        var out = [];
+        if (!list) return out;
+        for (var i = 0; i < list.length; i++) {
+            var v = list[i];
+            if (typeof v === "number" && isFinite(v) && v > 0) out.push(v);
+        }
+        return out;
+    }
+    var db = (typeof dbScale === "number" && isFinite(dbScale) && dbScale > 0) ? dbScale : 0;
+    var group = valid(wcsScales);
+    var source = "wcs";
+    if (group.length === 0) { group = valid(headerScales); source = "header"; }
+
+    var scale = 0, spread = 0;
+    if (group.length > 0) {
+        scale = median(group);
+        var best = [];
+        var n = Math.max(wcsScales ? wcsScales.length : 0, headerScales ? headerScales.length : 0);
+        for (var k = 0; k < n; k++) {
+            var w = wcsScales ? wcsScales[k] : 0;
+            var h = headerScales ? headerScales[k] : 0;
+            if (typeof w === "number" && isFinite(w) && w > 0) best.push(w);
+            else if (typeof h === "number" && isFinite(h) && h > 0) best.push(h);
+        }
+        spread = (Math.max.apply(null, best) - Math.min.apply(null, best)) / scale;
+    } else if (db > 0) {
+        scale = db;
+        source = "db";
+    } else {
+        source = "none";
+    }
+    var dbMismatch = NaN;
+    if (db > 0 && (source === "wcs" || source === "header")) {
+        dbMismatch = Math.abs(scale - db) / db;
+    }
+    return { scale: scale, source: source, dbScale: db, dbMismatch: dbMismatch, spread: spread };
+}
+
+/**
  * Return a descriptive sky condition label for a given SQM value.
  * Returns null when sqm is not a finite number: with no value there must be
  * no label (a label would make a missing value look like a measurement).
@@ -417,6 +481,8 @@ if (typeof module !== "undefined") {
         computeLPrimeSky:    computeLPrimeSky,
         computeSQM:          computeSQM,
         computePixelScale:   computePixelScale,
+        choosePixelScale:    choosePixelScale,
+        PIXEL_SCALE_WARN_FRAC: PIXEL_SCALE_WARN_FRAC,
         skyConditionLabel:   skyConditionLabel,
         normalizedToADU:     normalizedToADU,
         maxADUFor:           maxADUFor,

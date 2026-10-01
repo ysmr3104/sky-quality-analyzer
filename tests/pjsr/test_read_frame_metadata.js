@@ -124,4 +124,62 @@ test("readFrameMetadata: isReal=true for the floating-point Kochab frames", func
     assertEqual(meta.isReal, true, "isReal should be true");
 });
 
+// ============================================================
+// readFrameMetadata: wcsPixelScale / headerPixelScale (issue #14)
+// ============================================================
+test("readFrameMetadata: wcsPixelScale is about 3.82 arcsec/px for the Kochab frames", function() {
+    // Nominal: ASI294MC 4.63 um + RedCat 51 250 mm = 3.82 arcsec/px
+    for (var i = 0; i < FIXTURES.length; i++) {
+        var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[i].file);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        log("  " + FIXTURES[i].exptime + "s: wcsPixelScale=" + meta.wcsPixelScale
+            + "  headerPixelScale=" + meta.headerPixelScale);
+        assertTrue(isFinite(meta.wcsPixelScale), "wcsPixelScale must be finite");
+        assertEqual(meta.wcsPixelScale, 3.82, "wcsPixelScale", 3.82 * 0.03);
+    }
+});
+
+test("readFrameMetadata: wcsPixelScale and headerPixelScale agree (3.82 +-3%, mutual difference <= 2%) on all Kochab frames", function() {
+    // The fixtures carry XPIXSZ and FOCALLEN, so a header scale of 0 is a failure.
+    for (var i = 0; i < FIXTURES.length; i++) {
+        var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[i].file);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        assertTrue(meta.headerPixelScale > 0, FIXTURES[i].file + ": headerPixelScale is 0 (XPIXSZ / FOCALLEN not read)");
+        assertTrue(meta.wcsPixelScale > 0, FIXTURES[i].file + ": wcsPixelScale is 0");
+        var rel = Math.abs(meta.headerPixelScale - meta.wcsPixelScale) / meta.wcsPixelScale;
+        log("  " + FIXTURES[i].exptime + "s: header=" + meta.headerPixelScale + "  wcs=" + meta.wcsPixelScale + "  relative difference=" + rel);
+        assertEqual(meta.wcsPixelScale, 3.82, "wcsPixelScale", 3.82 * 0.03);
+        assertEqual(meta.headerPixelScale, 3.82, "headerPixelScale", 3.82 * 0.03);
+        assertTrue(rel <= 0.02, FIXTURES[i].file + ": header and WCS pixel scales differ by more than 2%");
+    }
+});
+
+// XPIXSZ=2.0 um, FOCALLEN=150 mm, XBINNING=2, no astrometric solution:
+// 2.0 / 150 * 206.265 = 2.750 arcsec/px. XBINNING must NOT be multiplied in
+// (XPIXSZ already includes it), so 5.500 would be wrong.
+test("readFrameMetadata: headerPixelScale ignores XBINNING; wcsPixelScale is 0 without a solution", function() {
+    var path = File.systemTempDirectory + "/sqa_header_scale_probe.xisf";
+    var w = new ImageWindow(64, 48, 1, 32, true, false, "sqa_header_scale_probe");
+    try {
+        w.keywords = [
+            new FITSKeyword("EXPTIME", "2.0", "Exposure time [s]"),
+            new FITSKeyword("XPIXSZ", "2.0", "Pixel size [um], binning included"),
+            new FITSKeyword("FOCALLEN", "150", "Focal length [mm]"),
+            new FITSKeyword("XBINNING", "2", "Binning")
+        ];
+        assertTrue(w.saveAs(path, false, false, false, false), "saveAs failed: " + path);
+    } finally {
+        w.forceClose();
+    }
+    try {
+        var meta = readFrameMetadata(path);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        log("  headerPixelScale=" + meta.headerPixelScale + "  wcsPixelScale=" + meta.wcsPixelScale + "  hasWcs=" + meta.hasWcs);
+        assertEqual(meta.headerPixelScale, 2.750, "headerPixelScale", 0.001);
+        assertEqual(meta.wcsPixelScale, 0, "wcsPixelScale without a solution", 0);
+    } finally {
+        if (File.exists(path)) File.remove(path);
+    }
+});
+
 runAllTests(RESULT_PATH);

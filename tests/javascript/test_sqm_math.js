@@ -409,6 +409,68 @@ assert(!math.significantPixelCentroid([], 100, 5).ok, "centroid: empty input is 
 assert(!math.significantPixelCentroid(makeStar(20, 20, 15, 1000, 100), 100, 0).ok, "centroid: std = 0 is not ok");
 
 // ============================================================
+// choosePixelScale (issue #14)
+// ============================================================
+var W = math.PIXEL_SCALE_WARN_FRAC;
+assert(W === 0.02, "pixelScale: warn threshold is 2%");
+
+var c1 = math.choosePixelScale([3.8, 3.82, 3.81], [3.0, 3.0], 3.82);
+assertClose(c1.scale, 3.81, 1e-9, "pixelScale: WCS wins over header and db (median)");
+assert(c1.source === "wcs", "pixelScale: source is wcs");
+
+var c2 = math.choosePixelScale([0, 3.82, 0], [3.0, 3.0, 3.0], 3.0);
+assertClose(c2.scale, 3.82, 1e-9, "pixelScale: WCS on a single frame is still used");
+assert(c2.source === "wcs", "pixelScale: partial WCS -> wcs");
+assertClose(c2.spread, (3.82 - 3.0) / 3.82, 1e-9, "pixelScale: unsolved frames count with their header value in the spread");
+assertClose(math.choosePixelScale([3.82], [], 0).spread, 0, 1e-12, "pixelScale: spread of one value is 0");
+
+var c3 = math.choosePixelScale([0, 0], [2.75, 2.75, 0], 3.82);
+assertClose(c3.scale, 2.75, 1e-9, "pixelScale: header when no WCS");
+assert(c3.source === "header", "pixelScale: source is header");
+assertClose(c3.dbMismatch, (3.82 - 2.75) / 3.82, 1e-9, "pixelScale: dbMismatch is relative to db");
+
+var c4 = math.choosePixelScale([], [], 3.82);
+assertClose(c4.scale, 3.82, 1e-9, "pixelScale: db when nothing else");
+assert(c4.source === "db", "pixelScale: source is db");
+assert(isNaN(c4.dbMismatch), "pixelScale: dbMismatch is NaN when source is db");
+assertClose(c4.spread, 0, 1e-12, "pixelScale: spread is 0 for db");
+
+var c5 = math.choosePixelScale([0], [0], 0);
+assert(c5.scale === 0 && c5.source === "none", "pixelScale: nothing known -> 0 / none");
+assert(isNaN(c5.dbMismatch), "pixelScale: dbMismatch NaN when none");
+var c5b = math.choosePixelScale(undefined, [NaN, -1], -2);
+assert(c5b.scale === 0 && c5b.source === "none", "pixelScale: NaN / negative / missing lists are ignored");
+
+var c6 = math.choosePixelScale([3.82], [], 0);
+assert(isNaN(c6.dbMismatch) && c6.source === "wcs", "pixelScale: dbMismatch NaN when db unknown");
+
+// spread = (max - min) / median
+var c7 = math.choosePixelScale([3.8, 4.0, 3.9], [], 0);
+assertClose(c7.spread, 0.2 / 3.9, 1e-9, "pixelScale: spread = (max-min)/median");
+
+// even count: median is the mean of the two middle values
+var c8 = math.choosePixelScale([3.80, 3.84], [], 0);
+assertClose(c8.scale, 3.82, 1e-9, "pixelScale: median of an even count is the mean of the middle two");
+
+// One solved frame (3.82) among header-only frames of other equipment (2.75):
+// scale stays with the solved group, but the frames disagree.
+var c9 = math.choosePixelScale([3.82, 0, 0, 0, 0, 0], [3.82, 2.75, 2.75, 2.75, 2.75, 2.75], 0);
+assertClose(c9.scale, 3.82, 1e-9, "pixelScale: mixed solved / unsolved keeps the WCS value");
+assert(c9.source === "wcs", "pixelScale: mixed -> wcs");
+assertClose(c9.spread, (3.82 - 2.75) / 3.82, 1e-9, "pixelScale: spread compares each frame's best value");
+assert(c9.spread > W, "pixelScale: mixed equipment is flagged");
+
+// Threshold: just below / above 2%
+var below = math.choosePixelScale([3.82 * 1.019], [], 3.82);
+var above = math.choosePixelScale([3.82 * 1.021], [], 3.82);
+assert(!(below.dbMismatch > W), "pixelScale: 1.9% mismatch is not flagged");
+assert(above.dbMismatch > W, "pixelScale: 2.1% mismatch is flagged");
+var sBelow = math.choosePixelScale([100, 101.9], [], 0);
+var sAbove = math.choosePixelScale([100, 102.5], [], 0);
+assert(!(sBelow.spread > W), "pixelScale: spread 1.9% is not flagged");
+assert(sAbove.spread > W, "pixelScale: spread 2.5% is flagged");
+
+// ============================================================
 // Summary
 // ============================================================
 console.log("\n============================");
