@@ -379,6 +379,36 @@ assert(isNaN(starAllSat.L_star), "all frames saturated: L_star = NaN");
 assert(starAllSat.excluded_frames === 2, "all frames saturated: excluded_frames = 2");
 
 // ============================================================
+// significantPixelCentroid (issue #22)
+// ============================================================
+function makeStar(cx, cy, r, peak, sky) {
+    var px = [];
+    for (var y = 0; y < 40; y++) {
+        for (var x = 0; x < 40; x++) {
+            var dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+            if (dx * dx + dy * dy > r * r) continue;
+            px.push({ x: x + 0.5, y: y + 0.5, v: sky + peak * Math.exp(-(dx * dx + dy * dy) / 4) });
+        }
+    }
+    return px;
+}
+var cen = math.significantPixelCentroid(makeStar(20.3, 19.6, 15, 1000, 100), 100, 5);
+assert(cen.ok, "centroid: bright synthetic star is detected");
+assertClose(cen.x, 20.3, 0.05, "centroid: x recovered");
+assertClose(cen.y, 19.6, 0.05, "centroid: y recovered");
+
+var flat = math.significantPixelCentroid(makeStar(20, 20, 15, 0, 100), 100, 5);
+assert(!flat.ok && flat.reason !== null, "centroid: no star -> not ok with a reason");
+
+var faint = math.significantPixelCentroid(makeStar(20, 20, 15, 30, 100), 100, 5);
+assert(!faint.ok, "centroid: 6 sigma peak is below the 10 sigma gate");
+
+var hot = [{ x: 5.5, y: 5.5, v: 1000 }, { x: 6.5, y: 5.5, v: 100 }];
+assert(!math.significantPixelCentroid(hot, 100, 5).ok, "centroid: a single hot pixel is rejected (fewer than 5 pixels)");
+assert(!math.significantPixelCentroid([], 100, 5).ok, "centroid: empty input is not ok");
+assert(!math.significantPixelCentroid(makeStar(20, 20, 15, 1000, 100), 100, 0).ok, "centroid: std = 0 is not ok");
+
+// ============================================================
 // Summary
 // ============================================================
 console.log("\n============================");
