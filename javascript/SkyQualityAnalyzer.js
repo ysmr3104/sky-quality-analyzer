@@ -1503,7 +1503,8 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       hasStar:    !!extOpts.star,
       airmasses:  usedAirmasses,
       nWithTime:  nUsedWithTime,
-      nWithSite:  nUsedWithSite
+      nWithSite:  nUsedWithSite,
+      siteEntryInvalid: !!extOpts.siteEntryInvalid
    });
    var sqm   = (ext.corrected && isFinite(sqmUncorrected)) ? sqmUncorrected + ext.correction : sqmUncorrected;
    var label = skyConditionLabel(sqm);  // null when sqm is not finite
@@ -2102,6 +2103,13 @@ constructor() {
 
    this.starNameEdit = new Edit(starGroupBox);
    this.starNameEdit.toolTip = "Enter star name (e.g., Tarazed, gamma Aql, Vega)";
+   // A new name makes the position found by an earlier search stale. The dialog
+   // code that fills this box also clears it, and Search never writes the box,
+   // so it does not matter whether a program assignment fires this handler.
+   this.starNameEdit.onTextUpdated = function(text) {
+      self.sesameRaDec = null;
+      self.invalidateResults();
+   };
 
    var searchBtn = new PushButton(starGroupBox);
    searchBtn.text    = "Search";
@@ -2251,7 +2259,7 @@ constructor() {
    this.siteLonEdit = new Edit(extGroupBox);
    this.siteLonEdit.text = extSaved.lon;
    this.siteLonEdit.setFixedWidth(130);
-   this.siteLonEdit.toolTip = "Longitude in degrees, EAST positive (west is negative). Decimal (139.69) or degrees minutes seconds (139 41 30).";
+   this.siteLonEdit.toolTip = "Longitude in degrees, EAST positive (west is negative; -180 to 180, or 0 to 360 east). Decimal (139.69) or degrees minutes seconds (139 41 30).";
    this.siteLonEdit.onTextUpdated = function(text) {
       writeSetting("SiteLongitude", DataType.String, text);
       self.invalidateResults();
@@ -2502,7 +2510,7 @@ constructor() {
    if (latText === "" && lonText === "") return null;
    if (latText === "" || lonText === "") return "Enter both latitude and longitude.";
    if (this.manualSite() === null)
-      return "The entered latitude/longitude is not valid (latitude -90 to 90, longitude -180 to 180, east positive).";
+      return "The entered latitude/longitude is not valid (latitude -90 to 90, longitude -180 to 180, or 0 to 360 east).";
    return null;
    }
 
@@ -2519,7 +2527,8 @@ constructor() {
       enabled:    this.extCheck.checked,
       k:          this.extKEdit.value,
       star:       this.extinctionStar(),
-      manualSite: this.manualSite()
+      manualSite: this.manualSite(),
+      siteEntryInvalid: this.siteEntryProblem() !== null
    };
    }
 

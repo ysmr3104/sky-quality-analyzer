@@ -509,7 +509,13 @@ assertClose(math.altitudeDeg(0, 90, 40, 10, 2451545.0), 40, 1e-9, "altitude: cel
 
 console.log("\n--- extinction: air mass (Kasten & Young 1989) ---");
 assertClose(math.airmassKastenYoung(90), 0.9997, 0.0002, "airmass: zenith is about 1");
-assertClose(math.airmassKastenYoung(30), 1.995, 0.002, "airmass: h=30 is about 2");
+// No table value is at hand to cite for h=30, so check the physics: the
+// plane-parallel air mass 1/sin(h) is 2.0 at h=30 and the curved, refracting
+// atmosphere gives a little less (the Earth's curvature lowers X near the horizon).
+var x30 = math.airmassKastenYoung(30);
+assert(x30 > 1.99 && x30 < 2.0, "airmass: h=30 is a little below 1/sin(h) = 2.0 (got " + x30.toFixed(4) + ")");
+var x45 = math.airmassKastenYoung(45);
+assert(x45 > 1.41 && x45 < 1.4143, "airmass: h=45 is a little below 1/sin(h) = 1.4142 (got " + x45.toFixed(4) + ")");
 assert(isNaN(math.airmassKastenYoung(9.99)), "airmass: below 10 deg is NaN");
 assert(isFinite(math.airmassKastenYoung(10)), "airmass: exactly 10 deg is computed");
 assert(isNaN(math.airmassKastenYoung(-5)), "airmass: below the horizon is NaN");
@@ -580,6 +586,10 @@ var mBadAvg = math.frameMidTime({ dateAvg: "junk", dateObs: tA, dateEnd: tB, exp
 assertClose(mBadAvg.ms, tAms + 5000, 0, "mid time: unreadable DATE-AVG falls through");
 var mStart = math.frameMidTime({ dateObs: tA, dateObsComment: "Time of observation", exptime: 10 });
 assertClose(mStart.ms, tAms + 5000, 0, "mid time: DATE-OBS is the start -> add half");
+var mCal = math.frameMidTime({ dateObs: tA, dateObsComment: "UTC calendar date of exposure start", exptime: 10 });
+assertClose(mCal.ms, tAms + 5000, 0, "mid time: 'calendar' does not count as 'end'");
+var mExt = math.frameMidTime({ dateObs: tA, dateObsComment: "extended exposure start", exptime: 10 });
+assertClose(mExt.ms, tAms + 5000, 0, "mid time: 'extended' does not count as 'end'");
 var mStart2 = math.frameMidTime({ dateObs: tA, exptime: 10 });
 assertClose(mStart2.ms, tAms + 5000, 0, "mid time: no comment -> start");
 var mEnd = math.frameMidTime({ dateObs: tB, dateObsComment: "Time end of exposure", exptime: 10 });
@@ -644,6 +654,8 @@ var dNoSite = ext({ nWithSite: 0, airmasses: [NaN, NaN] });
 assert(!dNoSite.corrected && /observing site/.test(dNoSite.reason), "decision: no site");
 var dNone = ext({ airmasses: [], nWithTime: 0, nWithSite: 0 });
 assert(!dNone.corrected && /No frame was usable/.test(dNone.reason), "decision: no frame in the star fit");
+var dBadSite = ext({ nWithSite: 0, airmasses: [NaN, NaN], siteEntryInvalid: true });
+assert(!dBadSite.corrected && /entered latitude\/longitude is not valid/.test(dBadSite.reason), "decision: invalid site entry has its own reason");
 var dLow = ext({ airmasses: [NaN, NaN] });
 assert(!dLow.corrected && /10 degrees/.test(dLow.reason), "decision: below 10 deg in every frame");
 assert(!ext({ k: NaN }).corrected, "decision: k not a number");

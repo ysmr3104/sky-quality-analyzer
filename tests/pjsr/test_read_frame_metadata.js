@@ -213,7 +213,7 @@ function fixtureKeywordValue(file, name) {
     }
 }
 
-test("readFrameMetadata: middle of the exposure equals DATE-OBS + EXPTIME/2 (0.01 s) on all Kochab frames", function() {
+test("readFrameMetadata: middle of DATE-OBS and DATE-END equals DATE-OBS + EXPTIME/2 (0.01 s) on all Kochab frames", function() {
     for (var i = 0; i < FIXTURES.length; i++) {
         var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[i].file);
         assertTrue(meta !== null, "readFrameMetadata returned null");
@@ -223,6 +223,7 @@ test("readFrameMetadata: middle of the exposure equals DATE-OBS + EXPTIME/2 (0.0
         assertTrue(isFinite(obs), FIXTURES[i].exptime + "s: DATE-OBS of the fixture is not readable");
         var diffS = Math.abs(meta.midTimeMs - (obs + FIXTURES[i].exptime * 500)) / 1000;
         log("  " + FIXTURES[i].exptime + "s: time source=" + meta.timeSource + "  |mid - (DATE-OBS + EXPTIME/2)|=" + diffS.toFixed(4) + " s");
+        assertEqual(meta.timeSource, "midpoint of DATE-OBS and DATE-END", FIXTURES[i].exptime + "s: time source");
         assertTrue(diffS <= 0.01, FIXTURES[i].exptime + "s: middle time differs from DATE-OBS + EXPTIME/2 by " + diffS + " s");
     }
 });

@@ -559,7 +559,7 @@ function frameMidTime(k) {
     }
     if (isFinite(start) && typeof k.exptime === "number" && k.exptime > 0) {
         var comment = (typeof k.dateObsComment === "string") ? k.dateObsComment : "";
-        if (/end/i.test(comment)) {
+        if (/\bend\b/i.test(comment)) {
             return { ms: start - k.exptime * 500, source: "DATE-OBS (end of exposure) minus half of EXPTIME" };
         }
         return { ms: start + k.exptime * 500, source: "DATE-OBS plus half of EXPTIME" };
@@ -712,10 +712,11 @@ function summarizeAirmass(values) {
  * Decide whether the extinction correction can be applied, and by how much.
  * Messages are for the operator: they say what to do and use no internal names.
  * @param {{enabled:boolean, k:number, hasStar:boolean, airmasses:number[],
- *          nWithTime:number, nWithSite:number}} info
+ *          nWithTime:number, nWithSite:number, siteEntryInvalid:(boolean|undefined)}} info
  *   airmasses - air mass of each frame that went into the star fit (NaN when unknown)
  *   nWithTime - how many of those frames have a usable time of exposure
  *   nWithSite - how many of those frames have an observing site
+ *   siteEntryInvalid - something was typed in the site boxes but it cannot be used
  * @returns {{corrected:boolean, reason:(string|null), k:number, correction:number,
  *            airmass:{count:number, mean:number, min:number, max:number},
  *            warnings:string[]}}
@@ -736,7 +737,9 @@ function decideExtinction(info) {
         out.reason = "No time of exposure in the frame headers"
             + " (DATE-AVG, DATE-OBS with DATE-END, or DATE-OBS with EXPTIME).";
     } else if (info.nWithSite === 0) {
-        out.reason = "No observing site: the frame headers have none and no latitude/longitude was entered.";
+        out.reason = info.siteEntryInvalid
+            ? "The entered latitude/longitude is not valid (latitude -90 to 90, longitude -180 to 180, or 0 to 360 east)."
+            : "No observing site: the frame headers have none and no latitude/longitude was entered.";
     } else if (stats.count === 0) {
         out.reason = "The star was lower than " + MIN_ALTITUDE_DEG + " degrees above the horizon in every frame.";
     }

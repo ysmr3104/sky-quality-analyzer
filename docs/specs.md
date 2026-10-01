@@ -693,7 +693,7 @@ X = 1 / ( sin h + 0.50572 × (h + 6.07995°)^−1.6364 )      h: 高度 [度]
 - k は**測るチャンネルに対する係数**。チャンネルごとに既定値を変えることはしない（根拠にできる実測が無い）。
 - 「補正するか」のチェックボックスがあり、既定は ON。
 
-**補正できないとき:** 観測地も時刻も無い、基準星の座標が無い、チェックが OFF、すべてのフレームが高度 10° 未満、のとき。**Analyze は止めない。** SQM に "not corrected for atmospheric extinction" の注記を付け、理由も表示する。空の状態のラベル（`skyConditionLabel`）は補正後の値（補正できなかったときは SQM_raw）で決める。
+**補正できないとき:** 観測地か時刻が無い、基準星の座標が無い、チェックが OFF、すべてのフレームが高度 10° 未満、のとき。**Analyze は止めない。** SQM に "not corrected for atmospheric extinction" の注記を付け、理由も表示する。空の状態のラベル（`skyConditionLabel`）は補正後の値（補正できなかったときは SQM_raw）で決める。
 
 **結果と CSV:** 補正したときは SQM の欄に補正後の値を出し、補正前の値・X（平均・最小・最大）・k・補正量（`+k·X` mag）を併記する。CSV には `SQM_uncorrected`、`Airmass`（平均）、`AirmassMin`、`AirmassMax`、`ExtinctionK`、`ExtinctionCorrection`、`ExtinctionCorrected`（yes / no）、補正しなかった理由、`ObservingSite`（緯度, 経度）、`ObservingSiteSource`、`ExposureTimeSource` を足す。
 
