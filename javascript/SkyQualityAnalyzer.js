@@ -94,9 +94,42 @@ function getFITSKeyword(keywords, name) {
    return null;
 }
 
+// Pixel scale [arcsec/px] from the FITS keywords XPIXSZ [um] and FOCALLEN [mm],
+// or 0 when either is missing or not positive. XBINNING is deliberately NOT
+// applied: capture software (DWARF, NINA) writes XPIXSZ already multiplied by
+// the binning, so multiplying again would count the binning twice.
+// PIXSCALE is not used either: writers disagree on whether it includes binning.
+function headerPixelScaleFromKeywords(keywords) {
+   var px = parseFloat(getFITSKeyword(keywords, "XPIXSZ"));
+   var fl = parseFloat(getFITSKeyword(keywords, "FOCALLEN"));
+   if (!(px > 0) || !(fl > 0)) return 0;
+   return computePixelScale(px, fl, 1);
+}
+
+// Pixel scale [arcsec/px] from the native astrometric solution of an open
+// window, or 0 when there is none (or any projection fails). Two points d px
+// away from the image center (one along x, one along y) are projected to the
+// sky; the scale is the geometric mean of the two separations per pixel, which
+// matches the pixel *area* that L'_sky divides by.
+function wcsPixelScaleOfWindow(win, width, height) {
+   if (win.hasAstrometricSolution !== true) return 0;
+   var d  = Math.min(100, width / 4, height / 4);
+   var cx = width / 2;
+   var cy = height / 2;
+   var c  = safeImageToCelestial(win, cx, cy);
+   var px = safeImageToCelestial(win, cx + d, cy);
+   var py = safeImageToCelestial(win, cx, cy + d);
+   if (!c || !px || !py || !(d > 0)) return 0;
+   var sx = angularSeparationArcsec(c.x, c.y, px.x, px.y) / d;
+   var sy = angularSeparationArcsec(c.x, c.y, py.x, py.y) / d;
+   var scale = Math.sqrt(sx * sy);
+   return (isFinite(scale) && scale > 0) ? scale : 0;
+}
+
 // Read frame metadata from a FITS file without keeping it open.
 // Returns { filepath, filename, exptime, instrume, gain, isColor, isReal,
-// bitsPerSample, hasWcs, isCfa } or null on error.
+// bitsPerSample, hasWcs, wcsPixelScale, headerPixelScale, isCfa } or null on
+// error. The two pixel scales are in arcsec/px, 0 when not available.
 // A raw CFA frame (not debayered) is returned with isCfa = true and the other
 // fields unchecked: the caller must reject it.
 function readFrameMetadata(filepath) {
@@ -130,6 +163,15 @@ function readFrameMetadata(filepath) {
 
    // Native astrometric solution check (WBPP attaches one to solved frames).
    var hasWcs = (win.hasAstrometricSolution === true);
+   var wcsPixelScale = 0;
+   if (hasWcs) {
+      try {
+         wcsPixelScale = wcsPixelScaleOfWindow(win, image.width, image.height);
+      } catch (e) {
+         wcsPixelScale = 0;
+      }
+   }
+   var headerPixelScale = headerPixelScaleFromKeywords(kws);
 
    win.close();
 
@@ -157,6 +199,8 @@ function readFrameMetadata(filepath) {
       isReal:        isReal,
       bitsPerSample: bitsPerSample,
       hasWcs:        hasWcs,
+      wcsPixelScale:    wcsPixelScale,
+      headerPixelScale: headerPixelScale,
       isCfa:         false
    };
 }
@@ -1261,10 +1305,34 @@ function aperturePhotometry(filepath, starX, starY, aperture, sqmChannel, starRa
 // Main analysis: iterate over all frames, collect data, compute SQM
 //============================================================================
 
-function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry, telescopeEntry, starRaDec) {
-   if (!cameraEntry || !telescopeEntry) return null;
+// Pixel scale source, as shown to the operator.
+function pixelScaleSourceText(source) {
+   if (source === "wcs")    return "from the plate solution";
+   if (source === "header") return "from the FITS header (XPIXSZ / FOCALLEN)";
+   if (source === "db")     return "from the selected camera and telescope";
+   return "unknown";
+}
 
-   var pixelScale    = computePixelScale(cameraEntry.pixel_pitch, telescopeEntry.focal_length, 1);
+// Warnings (array of strings) for a choosePixelScale() result. Analysis is not stopped.
+function pixelScaleWarnings(info) {
+   var out = [];
+   if (info.dbMismatch > PIXEL_SCALE_WARN_FRAC) {
+      out.push("The pixel scale of the images (" + info.scale.toFixed(3) + " arcsec/px) differs by "
+         + (info.dbMismatch * 100).toFixed(1) + "% from the selected camera and telescope ("
+         + info.dbScale.toFixed(3) + " arcsec/px). The selected equipment may not match these images.");
+   }
+   if (info.spread > PIXEL_SCALE_WARN_FRAC) {
+      out.push("The pixel scale differs by " + (info.spread * 100).toFixed(1)
+         + "% between frames. Frames from different equipment may be mixed.");
+   }
+   return out;
+}
+
+// pixelInfo: result of choosePixelScale() for the whole session.
+function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry, pixelInfo, starRaDec) {
+   if (!cameraEntry || !pixelInfo || !(pixelInfo.scale > 0)) return null;
+
+   var pixelScale    = pixelInfo.scale;
    var sqmChannel    = cameraEntry.sqm_channel || "G";
 
    var skyFrameData  = [];
@@ -1409,6 +1477,7 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       r2_star:          lStarResult.r2,
       L_prime_sky:      lPrimeSky,
       pixel_scale:      pixelScale,
+      pixel_scale_info: pixelInfo,
       sqm:              sqm,
       label:            label,
       n_frames:         skyFrameData.length,
@@ -1455,6 +1524,14 @@ function exportCSV(result, outputPath) {
    lines.push("R2_star,\"" + result.r2_star.toFixed(5) + "\"");
    lines.push("L_prime_sky,\"" + result.L_prime_sky.toFixed(6) + " counts/s/arcsec²\"");
    lines.push("PixelScale,\"" + result.pixel_scale.toFixed(3) + " arcsec/px\"");
+   var psi = result.pixel_scale_info;
+   if (psi) {
+      lines.push("PixelScaleSource,\"" + pixelScaleSourceText(psi.source) + "\"");
+      if (isFinite(psi.dbMismatch)) {
+         lines.push("PixelScaleFromEquipment,\"" + psi.dbScale.toFixed(3) + " arcsec/px\"");
+         lines.push("PixelScaleDifference,\"" + (psi.dbMismatch * 100).toFixed(1) + " %\"");
+      }
+   }
    lines.push("VMag,\"" + result.vmag.toFixed(3) + "\"");
    lines.push("Channel,\"" + result.sqmChannel + "\"");
    lines.push("BackgroundROI,\"(" + result.bgX + "," + result.bgY + ") 64×64 px\"");
@@ -1570,7 +1647,7 @@ constructor() {
          }
       }
 
-      if (added > 0) self.invalidateResults();
+      if (added > 0) { self.updatePixelScale(); self.invalidateResults(); }
 
       // Auto-detect camera from first frame's INSTRUME header
       if (added > 0 && self.frames.length > 0) {
@@ -1580,6 +1657,9 @@ constructor() {
                if (gEquipment.cameras[ci].instrume &&
                    gEquipment.cameras[ci].instrume.toLowerCase() === instrume.toLowerCase()) {
                   self.cameraCombo.currentItem = ci;
+                  // Assigning currentItem may not fire onItemSelected.
+                  self.updatePixelScale();
+                  self.invalidateResults();
                   break;
                }
             }
@@ -1610,6 +1690,7 @@ constructor() {
       for (var i = 0; i < indices.length; i++) {
          self.frames.splice(indices[i], 1);
       }
+      self.updatePixelScale();
       self.invalidateResults();
    };
 
@@ -1618,6 +1699,7 @@ constructor() {
    clearFramesBtn.toolTip = "Remove all frames from the list";
    clearFramesBtn.onClick = function() {
       self.frames = [];
+      self.updatePixelScale();
       self.invalidateResults();
    };
 
@@ -1761,7 +1843,7 @@ constructor() {
       }
       var ap = self.apertureSpinBox.value;
       // Compute current pixel scale from selected equipment for NearbyStarDialog suitability column.
-      var currentPs = self.currentPixelScale();
+      var currentPs = self.currentPixelScale().scale;
       // Use longest-exposure frame with an astrometric solution (best SNR for star
       // identification). Fall back to longest-exposure frame without one if none are solved.
       var previewFrame = null;
@@ -2114,25 +2196,33 @@ constructor() {
    if (!vmagOk)       missing.push("Enter the V magnitude");
    // Same condition as the check at the start of runAnalysis(): "Custom" entries
    // in equipment.json have pixel_pitch / focal_length = 0.
-   if (!(this.currentPixelScale() > 0))
-      missing.push("Select a camera and telescope with a known pixel size and focal length");
+   if (!(this.currentPixelScale().scale > 0))
+      missing.push("Pixel scale unknown: plate-solve the frames, or select a camera and telescope with a known pixel size and focal length");
    this.analyzeStatusLabel.text = (missing.length > 0) ? missing.join("  /  ") : "Ready";
 
    this.analyzeBtn.enabled = (missing.length === 0);
    }
 
-   // Pixel scale [arcsec/px] of the selected camera and telescope, or 0 if unknown.
+   // Pixel scale of the session: choosePixelScale() result (plate solution >
+   // FITS header > selected camera and telescope). scale = 0 when unknown.
    currentPixelScale() {
+   var wcsScales = [];
+   var hdrScales = [];
+   for (var i = 0; i < this.frames.length; i++) {
+      wcsScales.push(this.frames[i].wcsPixelScale || 0);
+      hdrScales.push(this.frames[i].headerPixelScale || 0);
+   }
+   var dbScale = 0;
    var ci = this.cameraCombo.currentItem;
    var ti = this.teleCombo.currentItem;
    if (ci >= 0 && ti >= 0 && ci < gEquipment.cameras.length && ti < gEquipment.telescopes.length) {
       var camE  = gEquipment.cameras[ci];
       var teleE = gEquipment.telescopes[ti];
       if (camE.pixel_pitch > 0 && teleE.focal_length > 0) {
-         return computePixelScale(camE.pixel_pitch, teleE.focal_length, 1);
+         dbScale = computePixelScale(camE.pixel_pitch, teleE.focal_length, 1);
       }
    }
-   return 0;
+   return choosePixelScale(wcsScales, hdrScales, dbScale);
    }
 
    // Warn when the position Sesame returns for `name` is far from the clicked
@@ -2141,7 +2231,7 @@ constructor() {
    if (!this.starRaDec) return;
    if (info.ra === null || info.dec === null) return;
    var sep = angularSeparationArcsec(this.starRaDec.ra, this.starRaDec.dec, info.ra, info.dec);
-   var ps  = this.currentPixelScale();
+   var ps  = this.currentPixelScale().scale;
    var limit = 120;
    if (ps > 0) limit = Math.max(120, 2 * this.apertureSpinBox.value * ps);
    console.writeln("  Sesame position is " + sep.toFixed(1) + " arcsec from the selected star (limit "
@@ -2166,21 +2256,18 @@ constructor() {
    }
 
    updatePixelScale() {
-   var ci = this.cameraCombo.currentItem;
-   var ti = this.teleCombo.currentItem;
-   if (ci < 0 || ti < 0 || ci >= gEquipment.cameras.length || ti >= gEquipment.telescopes.length) {
-      this.pixelScaleLabel.text = "Pixel Scale:  —  arcsec/px";
+   var info = this.currentPixelScale();
+   if (!(info.scale > 0)) {
+      this.pixelScaleLabel.text = "Pixel Scale:  \u2014  arcsec/px  (plate-solve the frames, or select a camera and telescope with a known pixel size and focal length)";
       return;
    }
-   var cam  = gEquipment.cameras[ci];
-   var tele = gEquipment.telescopes[ti];
-   if (cam.pixel_pitch > 0 && tele.focal_length > 0) {
-      var ps = computePixelScale(cam.pixel_pitch, tele.focal_length, 1);
-      this.pixelScaleLabel.text = "Pixel Scale:  " + ps.toFixed(3) + " arcsec/px"
-         + "  (" + cam.pixel_pitch + " μm / " + tele.focal_length + " mm)";
-   } else {
-      this.pixelScaleLabel.text = "Pixel Scale:  —  arcsec/px  (Custom: fill in pixel_pitch / focal_length)";
+   var text = "Pixel Scale:  " + info.scale.toFixed(3) + " arcsec/px  (" + pixelScaleSourceText(info.source) + ")";
+   if (isFinite(info.dbMismatch)) {
+      text += "  [selected equipment: " + info.dbScale.toFixed(3) + " arcsec/px]";
    }
+   var warns = pixelScaleWarnings(info);
+   for (var i = 0; i < warns.length; i++) text += "\nWARNING: " + warns[i];
+   this.pixelScaleLabel.text = text;
    }
 
    clearResults() {
@@ -2231,20 +2318,22 @@ constructor() {
 
    var ci = this.cameraCombo.currentItem;
    var ti = this.teleCombo.currentItem;
-   if (ci < 0 || ci >= gEquipment.cameras.length ||
-       ti < 0 || ti >= gEquipment.telescopes.length) {
-      var mb = new MessageBox("Please select a camera and telescope.", TITLE, StdIcon.Warning, StdButton.Ok);
+   // The camera is always needed (SQM channel). The telescope matters only when
+   // the pixel scale has to come from the equipment database.
+   if (ci < 0 || ci >= gEquipment.cameras.length) {
+      var mb = new MessageBox("Please select a camera.", TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
    }
 
    var cam  = gEquipment.cameras[ci];
-   var tele = gEquipment.telescopes[ti];
+   var tele = (ti >= 0 && ti < gEquipment.telescopes.length) ? gEquipment.telescopes[ti] : null;
 
-   if (cam.pixel_pitch <= 0 || tele.focal_length <= 0) {
+   var pixelInfo = this.currentPixelScale();
+   if (!(pixelInfo.scale > 0)) {
       var mb = new MessageBox(
-         "Custom equipment selected but pixel_pitch or focal_length is 0.\n"
-         + "Please edit equipment.json or select a specific camera/telescope.",
+         "Pixel scale unknown: plate-solve the frames, or select a camera and telescope\n"
+         + "with a known pixel size and focal length (edit equipment.json for Custom entries).",
          TITLE, StdIcon.Warning, StdButton.Ok);
       mb.execute();
       return;
@@ -2256,8 +2345,15 @@ constructor() {
    console.writeln("<b>Sky Quality Analyzer v" + VERSION + " — Analysis</b>");
    console.writeln("---");
    console.writeln("Camera:    " + cam.name + "  (channel: " + (cam.sqm_channel || "G") + ")");
-   console.writeln("Telescope: " + tele.name);
+   console.writeln("Telescope: " + (tele ? tele.name : "(none)"));
    console.writeln("Frames:    " + this.frames.length);
+   console.writeln("Pixel scale: " + pixelInfo.scale.toFixed(3) + " arcsec/px  (" + pixelScaleSourceText(pixelInfo.source) + ")");
+   if (isFinite(pixelInfo.dbMismatch)) {
+      console.writeln("  Selected equipment gives " + pixelInfo.dbScale.toFixed(3) + " arcsec/px ("
+         + (pixelInfo.dbMismatch * 100).toFixed(1) + "% difference)");
+   }
+   var psWarns = pixelScaleWarnings(pixelInfo);
+   for (var pw = 0; pw < psWarns.length; pw++) console.warningln("  WARNING: " + psWarns[pw]);
    console.writeln("Background ROI: (" + this.bgX + ", " + this.bgY + ") 64×64 px");
    console.writeln("Star Position:  (" + this.starX.toFixed(2) + ", " + this.starY.toFixed(2) + ")  aperture=" + aperture + " px");
    console.writeln("V magnitude:    " + this.vmag.toFixed(3));
@@ -2269,7 +2365,7 @@ constructor() {
    try {
       var result = runAnalysis(
          this.frames, this.bgX, this.bgY, this.starX, this.starY,
-         aperture, this.vmag, cam, tele, this.starRaDec);
+         aperture, this.vmag, cam, pixelInfo, this.starRaDec);
 
       if (!result) {
          var mb = new MessageBox(
@@ -2287,7 +2383,8 @@ constructor() {
       console.writeln("<b>Results:</b>");
       console.writeln("  L_sky        = " + result.L_sky.toFixed(4) + " counts/s/px  (R²=" + result.r2_sky.toFixed(5) + ")");
       console.writeln("  L_star       = " + result.L_star.toFixed(1) + " counts/s     (R²=" + result.r2_star.toFixed(5) + ")");
-      console.writeln("  Pixel Scale  = " + result.pixel_scale.toFixed(3) + " arcsec/px");
+      console.writeln("  Pixel Scale  = " + result.pixel_scale.toFixed(3) + " arcsec/px  ("
+         + pixelScaleSourceText(result.pixel_scale_info.source) + ")");
       console.writeln("  L'_sky       = " + result.L_prime_sky.toFixed(6) + " counts/s/arcsec²");
       if (result.label !== null) {
          console.writeln("  <b>SQM = " + result.sqm.toFixed(3) + " mag/arcsec²  → " + result.label + "</b>");
@@ -2317,7 +2414,8 @@ constructor() {
          + " counts/s/px  (R\u00b2=" + fixedOrDash(result.r2_sky, 4) + ")";
       this.resultLStarLabel.text = "L_star:          " + fixedOrDash(result.L_star, 1)
          + " counts/s  (R\u00b2=" + fixedOrDash(result.r2_star, 4) + ")" + excludedStr;
-      this.resultPixScaleLabel.text = "Pixel Scale:     " + result.pixel_scale.toFixed(3) + " arcsec/px";
+      this.resultPixScaleLabel.text = "Pixel Scale:     " + result.pixel_scale.toFixed(3) + " arcsec/px  ("
+         + pixelScaleSourceText(result.pixel_scale_info.source) + ")";
       this.resultNFramesLabel.text  = "Frames:          " + result.n_frames + " measured"
          + (nExcluded > 0 ? ",  " + nUsed + " used for L_star  (" + nExcluded + " sat excluded)" : "");
 
@@ -2325,6 +2423,8 @@ constructor() {
       if (result.r2_sky  < 0.99) warnings.push("R\u00b2_sky="  + result.r2_sky.toFixed(3)  + " is low \u2014 check background ROI for stars.");
       if (result.r2_star < 0.99) warnings.push("R\u00b2_star=" + result.r2_star.toFixed(3) + " is low \u2014 check star position and aperture.");
       if (result.failure_reason) warnings.push(result.failure_reason);
+      var psw = pixelScaleWarnings(result.pixel_scale_info);
+      for (var pwi = 0; pwi < psw.length; pwi++) warnings.push(psw[pwi]);
       if (result.nonlinear_frames && result.nonlinear_frames.length > 0)
          warnings.push("Non-linear rate (not excluded): " + result.nonlinear_frames.join(", "));
       if (result.centroid_shifted_frames && result.centroid_shifted_frames.length > 0) {
