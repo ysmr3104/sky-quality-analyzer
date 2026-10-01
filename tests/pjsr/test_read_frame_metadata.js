@@ -182,4 +182,180 @@ test("readFrameMetadata: headerPixelScale ignores XBINNING; wcsPixelScale is 0 w
     }
 });
 
+// ============================================================
+// readFrameMetadata: time of exposure and observing site (issue #12)
+// The fixtures carry the real observing site and date of the photographer.
+// This test never writes those values to the log: only the source of each
+// value and whether it passed a range check.
+// ============================================================
+var KOCHAB_RA  = 222.676357;
+var KOCHAB_DEC = 74.155505;
+
+// Write a 1-channel temporary XISF with the given FITS keywords.
+function writeTempFrameWithKeywords(path, keywords) {
+    var w = new ImageWindow(64, 48, 1, 32, true, false, "sqa_extinction_probe");
+    try {
+        w.keywords = keywords;
+        assertTrue(w.saveAs(path, false, false, false, false), "saveAs failed: " + path);
+    } finally {
+        w.forceClose();
+    }
+}
+
+// Keyword of a fixture, read with the same helper readFrameMetadata() uses.
+function fixtureKeywordValue(file, name) {
+    var wins = ImageWindow.open(FIXTURE_DIR + file);
+    assertTrue(wins && wins.length > 0, "ImageWindow.open failed");
+    try {
+        return getFITSKeyword(wins[0].keywords, name);
+    } finally {
+        wins[0].forceClose();
+    }
+}
+
+test("readFrameMetadata: middle of DATE-OBS and DATE-END equals DATE-OBS + EXPTIME/2 (0.01 s) on all Kochab frames", function() {
+    for (var i = 0; i < FIXTURES.length; i++) {
+        var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[i].file);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        assertTrue(isFinite(meta.midTimeMs), FIXTURES[i].exptime + "s: no middle time was found");
+        var obs = parseFitsDateTime(fixtureKeywordValue(FIXTURES[i].file, "DATE-OBS"),
+                                    fixtureKeywordValue(FIXTURES[i].file, "TIME-OBS"));
+        assertTrue(isFinite(obs), FIXTURES[i].exptime + "s: DATE-OBS of the fixture is not readable");
+        var diffS = Math.abs(meta.midTimeMs - (obs + FIXTURES[i].exptime * 500)) / 1000;
+        log("  " + FIXTURES[i].exptime + "s: time source=" + meta.timeSource + "  |mid - (DATE-OBS + EXPTIME/2)|=" + diffS.toFixed(4) + " s");
+        assertEqual(meta.timeSource, "midpoint of DATE-OBS and DATE-END", FIXTURES[i].exptime + "s: time source");
+        assertTrue(diffS <= 0.01, FIXTURES[i].exptime + "s: middle time differs from DATE-OBS + EXPTIME/2 by " + diffS + " s");
+    }
+});
+
+test("readFrameMetadata: observing site is a finite value in range, taken from OBSGEO, on all Kochab frames", function() {
+    for (var i = 0; i < FIXTURES.length; i++) {
+        var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[i].file);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        assertTrue(meta.site !== null, FIXTURES[i].exptime + "s: no observing site was found");
+        var ok = isFinite(meta.site.lat) && isFinite(meta.site.lon)
+            && meta.site.lat >= -90 && meta.site.lat <= 90
+            && meta.site.lon >= -180 && meta.site.lon <= 180;
+        log("  " + FIXTURES[i].exptime + "s: site source=" + meta.site.source + "  finite and in range=" + ok);
+        assertTrue(ok, FIXTURES[i].exptime + "s: site is not a finite value in range");
+        assertTrue(meta.site.source.indexOf("OBSGEO") >= 0, "site source is not OBSGEO: " + meta.site.source);
+    }
+});
+
+test("readFrameMetadata: Kochab air mass is between 1.0 and 3.5 in every Kochab frame", function() {
+    var xs = [];
+    for (var i = 0; i < FIXTURES.length; i++) {
+        var meta = readFrameMetadata(FIXTURE_DIR + FIXTURES[i].file);
+        assertTrue(meta !== null && meta.site !== null && isFinite(meta.midTimeMs), "frame lacks site or time");
+        var fa = frameAirmass(KOCHAB_RA, KOCHAB_DEC, meta.site, meta.midTimeMs);
+        assertTrue(isFinite(fa.airmass), FIXTURES[i].exptime + "s: air mass is not finite");
+        assertTrue(fa.airmass >= 1.0 && fa.airmass <= 3.5, FIXTURES[i].exptime + "s: air mass out of range");
+        xs.push(fa.airmass);
+    }
+    var sm = summarizeAirmass(xs);
+    log("  Kochab air mass over " + sm.count + " frames: mean=" + sm.mean.toFixed(4)
+        + "  min=" + sm.min.toFixed(4) + "  max=" + sm.max.toFixed(4));
+    var k = EXTINCTION_K_DEFAULT;
+    log("  correction with k=" + k + ": +" + extinctionCorrectionMag(k, sm.mean).toFixed(4) + " mag");
+});
+
+// DWARF type: DATE-OBS is the END of the exposure (its comment says so) and
+// there is no observing site. 10 s exposure ending at 04:05:16 -> middle 04:05:11.
+test("readFrameMetadata: DWARF-style frame (DATE-OBS comment 'Time end of exposure', no site)", function() {
+    var path = File.systemTempDirectory + "/sqa_dwarf_probe.xisf";
+    writeTempFrameWithKeywords(path, [
+        new FITSKeyword("EXPTIME", "10.0", "Exposure time [s]"),
+        new FITSKeyword("DATE-OBS", "'2001-02-03T04:05:16.000'", "Time end of exposure")
+    ]);
+    try {
+        var meta = readFrameMetadata(path);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        log("  DWARF-style: time source=" + meta.timeSource + "  site=" + (meta.site === null ? "none" : meta.site.source));
+        assertEqual(meta.midTimeMs, Date.UTC(2001, 1, 3, 4, 5, 11), "middle of the exposure", 1);
+        assertTrue(meta.timeSource.indexOf("end of exposure") >= 0, "time source: " + meta.timeSource);
+        assertTrue(meta.site === null, "a DWARF-style frame has no site");
+    } finally {
+        if (File.exists(path)) File.remove(path);
+    }
+});
+
+// The same keyword with a start-of-exposure comment must be treated as the start.
+test("readFrameMetadata: DATE-OBS without 'end' in its comment is the start of the exposure", function() {
+    var path = File.systemTempDirectory + "/sqa_start_probe.xisf";
+    writeTempFrameWithKeywords(path, [
+        new FITSKeyword("EXPTIME", "10.0", "Exposure time [s]"),
+        new FITSKeyword("DATE-OBS", "'2001-02-03T04:05:06.000'", "UTC date at start of observation")
+    ]);
+    try {
+        var meta = readFrameMetadata(path);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        log("  start-style: time source=" + meta.timeSource);
+        assertEqual(meta.midTimeMs, Date.UTC(2001, 1, 3, 4, 5, 11), "middle of the exposure", 1);
+    } finally {
+        if (File.exists(path)) File.remove(path);
+    }
+});
+
+// N.I.N.A. type: SITELAT / SITELONG as sexagesimal strings, DATE-OBS the start.
+// Site: 38 55 17 N, 77 03 56 W (the public Meeus example).
+test("readFrameMetadata: N.I.N.A.-style frame (SITELAT/SITELONG as sexagesimal strings)", function() {
+    var path = File.systemTempDirectory + "/sqa_nina_probe.xisf";
+    writeTempFrameWithKeywords(path, [
+        new FITSKeyword("EXPTIME", "20.0", "Exposure time [s]"),
+        new FITSKeyword("DATE-OBS", "'2001-02-03T04:05:06.000'", "Time of observation"),
+        new FITSKeyword("SITELAT", "'+38 55 17.0'", "Observation site latitude"),
+        new FITSKeyword("SITELONG", "'-77 03 56.0'", "Observation site longitude")
+    ]);
+    try {
+        var meta = readFrameMetadata(path);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        assertTrue(meta.site !== null, "site was not read");
+        log("  N.I.N.A.-style: site source=" + meta.site.source + "  time source=" + meta.timeSource);
+        assertEqual(meta.site.lat, 38 + 55 / 60 + 17 / 3600, "latitude", 1e-6);
+        assertEqual(meta.site.lon, -(77 + 3 / 60 + 56 / 3600), "longitude (east positive)", 1e-6);
+        assertTrue(meta.site.source.indexOf("SITELAT") >= 0, "site source: " + meta.site.source);
+        assertEqual(meta.midTimeMs, Date.UTC(2001, 1, 3, 4, 5, 16), "middle of the exposure", 1);
+    } finally {
+        if (File.exists(path)) File.remove(path);
+    }
+});
+
+// DATE-OBS (date only) + TIME-OBS, with decimal OBSGEO and DATE-AVG absent.
+test("readFrameMetadata: DATE-OBS (date only) + TIME-OBS and decimal OBSGEO-B/OBSGEO-L", function() {
+    var path = File.systemTempDirectory + "/sqa_split_probe.xisf";
+    writeTempFrameWithKeywords(path, [
+        new FITSKeyword("EXPTIME", "10.0", "Exposure time [s]"),
+        new FITSKeyword("DATE-OBS", "'2001-02-03'", "Date of observation"),
+        new FITSKeyword("TIME-OBS", "'04:05:06'", "Start time of observation"),
+        new FITSKeyword("OBSGEO-B", "38.921389", "Latitude [deg]"),
+        new FITSKeyword("OBSGEO-L", "-77.065556", "Longitude [deg]")
+    ]);
+    try {
+        var meta = readFrameMetadata(path);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        assertTrue(meta.site !== null, "site was not read");
+        log("  split-style: site source=" + meta.site.source + "  time source=" + meta.timeSource);
+        assertEqual(meta.midTimeMs, Date.UTC(2001, 1, 3, 4, 5, 11), "middle of the exposure", 1);
+        assertEqual(meta.site.lat, 38.921389, "latitude", 1e-6);
+        assertEqual(meta.site.lon, -77.065556, "longitude", 1e-6);
+        assertTrue(meta.site.source.indexOf("OBSGEO") >= 0, "site source: " + meta.site.source);
+    } finally {
+        if (File.exists(path)) File.remove(path);
+    }
+});
+
+// No date at all: the frame is still read, with no middle time.
+test("readFrameMetadata: no date keywords gives midTimeMs = NaN and site = null (frame still read)", function() {
+    var path = File.systemTempDirectory + "/sqa_nodate_probe.xisf";
+    writeTempFrameWithKeywords(path, [ new FITSKeyword("EXPTIME", "10.0", "Exposure time [s]") ]);
+    try {
+        var meta = readFrameMetadata(path);
+        assertTrue(meta !== null, "readFrameMetadata returned null");
+        assertTrue(isNaN(meta.midTimeMs), "midTimeMs should be NaN");
+        assertTrue(meta.timeSource === null && meta.site === null, "no source expected");
+    } finally {
+        if (File.exists(path)) File.remove(path);
+    }
+});
+
 runAllTests(RESULT_PATH);

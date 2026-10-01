@@ -94,6 +94,36 @@ function getFITSKeyword(keywords, name) {
    return null;
 }
 
+// Look up the comment of a FITS keyword (null when the keyword is absent).
+// FITSKeyword.comment: /Applications/PixInsight/doc/pjsr/objects/FITSKeyword/FITSKeyword.html
+function getFITSKeywordComment(keywords, name) {
+   for (var i = 0; i < keywords.length; i++) {
+      if (keywords[i].name === name) return keywords[i].comment || "";
+   }
+   return null;
+}
+
+// Time of exposure and observing site from a keyword list, via the pure
+// functions in sqm_math.js. Returns { mid: {ms, source}|null, site: {lat, lon, source}|null }.
+// The keyword values are passed as read: the parsers remove the quotes.
+function exposureTimeAndSiteFromKeywords(kws, exptime) {
+   var mid = frameMidTime({
+      dateAvg:        getFITSKeyword(kws, "DATE-AVG"),
+      dateObs:        getFITSKeyword(kws, "DATE-OBS"),
+      timeObs:        getFITSKeyword(kws, "TIME-OBS"),
+      dateObsComment: getFITSKeywordComment(kws, "DATE-OBS"),
+      dateEnd:        getFITSKeyword(kws, "DATE-END"),
+      exptime:        exptime
+   });
+   var site = siteFromKeywords({
+      sitelat:  getFITSKeyword(kws, "SITELAT"),
+      sitelong: getFITSKeyword(kws, "SITELONG"),
+      obsgeoB:  getFITSKeyword(kws, "OBSGEO-B"),
+      obsgeoL:  getFITSKeyword(kws, "OBSGEO-L")
+   });
+   return { mid: mid, site: site };
+}
+
 // Pixel scale [arcsec/px] from the FITS keywords XPIXSZ [um] and FOCALLEN [mm],
 // or 0 when either is missing or not positive. XBINNING is deliberately NOT
 // applied: capture software (DWARF, NINA) writes XPIXSZ already multiplied by
@@ -128,8 +158,11 @@ function wcsPixelScaleOfWindow(win, width, height) {
 
 // Read frame metadata from a FITS file without keeping it open.
 // Returns { filepath, filename, exptime, instrume, gain, isColor, isReal,
-// bitsPerSample, hasWcs, wcsPixelScale, headerPixelScale, isCfa } or null on
-// error. The two pixel scales are in arcsec/px, 0 when not available.
+// bitsPerSample, hasWcs, wcsPixelScale, headerPixelScale, midTimeMs, timeSource,
+// site, isCfa } or null on error. The two pixel scales are in arcsec/px, 0 when
+// not available. midTimeMs is the middle of the exposure (UTC, ms since the Unix
+// epoch; NaN when the headers give none) and timeSource says where it came from;
+// site is { lat, lon, source } (degrees, east positive) or null.
 // A raw CFA frame (not debayered) is returned with isCfa = true and the other
 // fields unchecked: the caller must reject it.
 function readFrameMetadata(filepath) {
@@ -172,6 +205,7 @@ function readFrameMetadata(filepath) {
       }
    }
    var headerPixelScale = headerPixelScaleFromKeywords(kws);
+   var timeSite = exposureTimeAndSiteFromKeywords(kws, exptime);
 
    win.close();
 
@@ -201,6 +235,9 @@ function readFrameMetadata(filepath) {
       hasWcs:        hasWcs,
       wcsPixelScale:    wcsPixelScale,
       headerPixelScale: headerPixelScale,
+      midTimeMs:     timeSite.mid ? timeSite.mid.ms : NaN,
+      timeSource:    timeSite.mid ? timeSite.mid.source : null,
+      site:          timeSite.site,
       isCfa:         false
    };
 }
@@ -1328,8 +1365,22 @@ function pixelScaleWarnings(info) {
    return out;
 }
 
+// Distinct values of a list, in order of first appearance.
+function distinctValues(list) {
+   var out = [];
+   for (var i = 0; i < list.length; i++) {
+      if (list[i] && out.indexOf(list[i]) < 0) out.push(list[i]);
+   }
+   return out;
+}
+
 // pixelInfo: result of choosePixelScale() for the whole session.
-function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry, pixelInfo, starRaDec) {
+// starRaDec: sky position used to find the star in each frame (photometry).
+// extOpts: { enabled, k, star: {ra, dec}|null, manualSite: {lat, lon}|null }
+// for the atmospheric extinction correction. star may come from a name search
+// when starRaDec is null; it is used for the air mass only, never for photometry.
+function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry, pixelInfo, starRaDec, extOpts) {
+   if (!extOpts) extOpts = { enabled: false, k: EXTINCTION_K_DEFAULT, star: null, manualSite: null };
    if (!cameraEntry || !pixelInfo || !(pixelInfo.scale > 0)) return null;
 
    var pixelScale    = pixelInfo.scale;
@@ -1339,6 +1390,7 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    var starFrameData = [];
    var frameResults  = [];  // per-frame data for UI display
    var measuredFrames = []; // frames that actually went into this result (for CSV export)
+   var extFrameInfo   = []; // per measured frame: { timeSource, siteSource, hasTime, hasSite, airmass, altitude }
    var centroidShiftedFrames = [];  // star position corrected by more than CENTROID_WARN_SHIFT_PX
    var centroidFailedFrames  = [];  // no star found around the selected position (or too close to the edge)
    var centroidFarFrames     = [];  // a star was found but too far away to trust (measured at the selected position)
@@ -1382,6 +1434,22 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
          else centroidFailedFrames.push(f.filename);
       }
 
+      // Air mass of the reference star in this frame (extinction correction).
+      var frameSite = chooseSite(f.site || null, extOpts.manualSite);
+      var hasTime   = isFinite(f.midTimeMs);
+      var air = (extOpts.star && frameSite && hasTime)
+         ? frameAirmass(extOpts.star.ra, extOpts.star.dec, frameSite, f.midTimeMs)
+         : { altitude: NaN, airmass: NaN };
+      extFrameInfo.push({
+         timeSource: hasTime ? f.timeSource : null,
+         siteSource: frameSite ? frameSite.source : null,
+         site:       frameSite,
+         hasTime:    hasTime,
+         hasSite:    !!frameSite,
+         airmass:    air.airmass,
+         altitude:   air.altitude
+      });
+
       measuredFrames.push({ filename: f.filename, exptime: f.exptime });
       skyFrameData.push({ exptime: f.exptime, adu_sky: bg.adu_sky });
       starFrameData.push({
@@ -1396,7 +1464,9 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
          saturated_fraction:  ap.saturated_fraction || 0,
          saturated_pixels:    ap.saturated_pixels || 0,
          centroid_shift:      ap.centroidShift,
-         centroid_refined:    ap.centroidRefined
+         centroid_refined:    ap.centroidRefined,
+         airmass:             air.airmass,
+         altitude:            air.altitude
       });
    }
 
@@ -1405,8 +1475,7 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    var lSkyResult  = computeLSky(skyFrameData);
    var lStarResult = computeLStar(starFrameData);
    var lPrimeSky   = computeLPrimeSky(lSkyResult.L_sky, pixelScale);
-   var sqm         = computeSQM(lStarResult.L_star, lPrimeSky, vmag);
-   var label       = skyConditionLabel(sqm);  // null when sqm is not finite
+   var sqmUncorrected = computeSQM(lStarResult.L_star, lPrimeSky, vmag);
 
    // Tag each frame as used (no saturated pixels in the aperture) or excluded.
    // Uses the same threshold as computeLStar()'s own exclusion criterion
@@ -1414,6 +1483,34 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
    for (var k = 0; k < frameResults.length; k++) {
       frameResults[k].used = (frameResults[k].saturated_fraction <= MAX_SAT_FRACTION);
    }
+
+   // Atmospheric extinction: the star is measured through the air, its catalog
+   // magnitude is not, so SQM_raw is too small by k * X. X is the mean over the
+   // frames that went into the star fit.
+   var usedAirmasses = [], usedTimeSources = [], usedSiteSources = [];
+   var nUsedWithTime = 0, nUsedWithSite = 0, extSite = null;
+   for (var k = 0; k < frameResults.length; k++) {
+      if (!frameResults[k].used) continue;
+      var ei = extFrameInfo[k];
+      usedAirmasses.push(ei.airmass);
+      if (ei.hasTime) { nUsedWithTime++; usedTimeSources.push(ei.timeSource); }
+      if (ei.hasSite) { nUsedWithSite++; usedSiteSources.push(ei.siteSource); }
+      if (!extSite && isFinite(ei.airmass)) extSite = ei.site;
+   }
+   var ext = decideExtinction({
+      enabled:    extOpts.enabled,
+      k:          extOpts.k,
+      hasStar:    !!extOpts.star,
+      airmasses:  usedAirmasses,
+      nWithTime:  nUsedWithTime,
+      nWithSite:  nUsedWithSite,
+      siteEntryInvalid: !!extOpts.siteEntryInvalid
+   });
+   var sqm   = (ext.corrected && isFinite(sqmUncorrected)) ? sqmUncorrected + ext.correction : sqmUncorrected;
+   var label = skyConditionLabel(sqm);  // null when sqm is not finite
+   ext.timeSources = distinctValues(usedTimeSources);
+   ext.siteSources = distinctValues(usedSiteSources);
+   ext.site        = extSite;
 
    // Linearity check (warning only, not an exclusion — see RATE_DEV_WARN comment above):
    // for frames used in the L_star fit, adu_star/exptime should be a constant rate.
@@ -1479,6 +1576,8 @@ function runAnalysis(frames, bgX, bgY, starX, starY, aperture, vmag, cameraEntry
       pixel_scale:      pixelScale,
       pixel_scale_info: pixelInfo,
       sqm:              sqm,
+      sqm_uncorrected:  sqmUncorrected,
+      extinction:       ext,
       label:            label,
       n_frames:         skyFrameData.length,
       excluded_frames:  lStarResult.excluded_frames || 0,
@@ -1516,8 +1615,24 @@ function exportCSV(result, outputPath) {
    lines.push("# Generated: " + (new Date()).toISOString());
    lines.push("");
    lines.push("# Results");
-   lines.push("SQM,\"" + result.sqm.toFixed(3) + " mag/arcsec²\"");
+   var ext = result.extinction;
+   lines.push("SQM,\"" + result.sqm.toFixed(3) + " mag/arcsec²"
+      + (ext && !ext.corrected ? " (not corrected for atmospheric extinction)" : "") + "\"");
    lines.push("SkyCondition,\"" + result.label + "\"");
+   if (ext) {
+      lines.push("SQM_uncorrected,\"" + result.sqm_uncorrected.toFixed(3) + " mag/arcsec²\"");
+      lines.push("ExtinctionCorrected,\"" + (ext.corrected ? "yes" : "no") + "\"");
+      if (!ext.corrected) lines.push("ExtinctionNotCorrectedReason,\"" + ext.reason + "\"");
+      lines.push("ExtinctionK,\"" + (isFinite(ext.k) ? ext.k.toFixed(3) + " mag/airmass" : "") + "\"");
+      lines.push("ExtinctionCorrection,\"" + (ext.corrected ? "+" + ext.correction.toFixed(3) + " mag" : "none") + "\"");
+      lines.push("Airmass,\"" + (ext.airmass.count > 0 ? ext.airmass.mean.toFixed(3) : "") + "\"");
+      lines.push("AirmassMin,\"" + (ext.airmass.count > 0 ? ext.airmass.min.toFixed(3) : "") + "\"");
+      lines.push("AirmassMax,\"" + (ext.airmass.count > 0 ? ext.airmass.max.toFixed(3) : "") + "\"");
+      lines.push("ObservingSite,\"" + (ext.site
+         ? ext.site.lat.toFixed(4) + ", " + ext.site.lon.toFixed(4) + " (latitude, east longitude; deg)" : "") + "\"");
+      lines.push("ObservingSiteSource,\"" + ext.siteSources.join("; ") + "\"");
+      lines.push("ExposureTimeSource,\"" + ext.timeSources.join("; ") + "\"");
+   }
    lines.push("L_sky,\"" + result.L_sky.toFixed(4) + " counts/s/px\"");
    lines.push("R2_sky,\"" + result.r2_sky.toFixed(5) + "\"");
    lines.push("L_star,\"" + result.L_star.toFixed(1) + " counts/s\"");
@@ -1549,6 +1664,45 @@ function exportCSV(result, outputPath) {
 }
 
 //============================================================================
+// Saved settings (Settings: /Applications/PixInsight/doc/pjsr/objects/Settings/Settings.html)
+// Every change is written at once, not at exit, so a crash or a forced close
+// loses nothing.
+//============================================================================
+
+var SETTINGS_PREFIX = "SkyQualityAnalyzer/";
+
+function readSetting(name, dataType) {
+   try {
+      var v = Settings.read(SETTINGS_PREFIX + name, dataType);
+      return Settings.lastReadOK ? v : null;
+   } catch (e) {
+      return null;
+   }
+}
+
+function writeSetting(name, dataType, value) {
+   try {
+      Settings.write(SETTINGS_PREFIX + name, dataType, value);
+   } catch (e) {
+      console.warningln("Could not save the setting '" + name + "': " + e);
+   }
+}
+
+// Saved values for the extinction controls, with defaults for anything missing or invalid.
+function loadExtinctionSettings() {
+   var enabled = readSetting("ExtinctionEnabled", DataType.Boolean);
+   var k       = readSetting("ExtinctionK", DataType.Real64);
+   var lat     = readSetting("SiteLatitude", DataType.String);
+   var lon     = readSetting("SiteLongitude", DataType.String);
+   return {
+      enabled: (enabled === null) ? true : !!enabled,
+      k:       (typeof k === "number" && isFinite(k) && k >= 0 && k <= 1) ? k : EXTINCTION_K_DEFAULT,
+      lat:     (typeof lat === "string") ? lat : "",
+      lon:     (typeof lon === "string") ? lon : ""
+   };
+}
+
+//============================================================================
 // Main Dialog
 //============================================================================
 
@@ -1565,6 +1719,7 @@ constructor() {
    this.starX     = -1;           // Reference star X
    this.starY     = -1;           // Reference star Y
    this.starRaDec = null;         // { ra, dec } of the reference star, if tied to sky coordinates
+   this.sesameRaDec = null;       // { ra, dec } of the star found by name search (fallback for the air mass only)
    this.vmag      = NaN;          // V magnitude
    this.sqmResult = null;         // Last analysis result
 
@@ -1590,23 +1745,25 @@ constructor() {
 
    this.frameTree = new TreeBox(framesGroupBox);
    this.frameTree.headerVisible  = true;
-   this.frameTree.numberOfColumns = 7;
+   this.frameTree.numberOfColumns = 8;
    this.frameTree.setColumnWidth(0, 280);
    this.frameTree.setColumnWidth(1, 70);
    this.frameTree.setColumnWidth(2, 70);
    this.frameTree.setColumnWidth(3, 45);
    this.frameTree.setColumnWidth(4, 90);
    this.frameTree.setColumnWidth(5, 90);
-   this.frameTree.setColumnWidth(6, 80);
+   this.frameTree.setColumnWidth(6, 60);
+   this.frameTree.setColumnWidth(7, 80);
    this.frameTree.setHeaderText(0, "Filename");
    this.frameTree.setHeaderText(1, "Exp (s)");
    this.frameTree.setHeaderText(2, "Color");
    this.frameTree.setHeaderText(3, "WCS");
    this.frameTree.setHeaderText(4, "Flux (ADU)");
    this.frameTree.setHeaderText(5, "Sat%");
-   this.frameTree.setHeaderText(6, "Status");
+   this.frameTree.setHeaderText(6, "Airmass");
+   this.frameTree.setHeaderText(7, "Status");
    this.frameTree.setMinHeight(120);
-   this.frameTree.toolTip = "List of FITS frames to analyze. Flux, Sat% and Status are filled after analysis.";
+   this.frameTree.toolTip = "List of FITS frames to analyze. Flux, Sat%, Airmass and Status are filled after analysis.";
 
    var addFramesBtn = new PushButton(framesGroupBox);
    addFramesBtn.text    = "Add Frames...";
@@ -1874,6 +2031,7 @@ constructor() {
             self.starX     = dlg.selectedX;
             self.starY     = dlg.selectedY;
             self.starRaDec = dlg.selectedRaDec || null;
+            self.sesameRaDec = null;   // belonged to the previous star
             self.starPosDisplay.text = "X=" + self.starX.toFixed(2) + "  Y=" + self.starY.toFixed(2);
             if (dlg.selectedStar) {
                // Auto-fill name and V mag: a catalog star was identified in the dialog
@@ -1945,6 +2103,13 @@ constructor() {
 
    this.starNameEdit = new Edit(starGroupBox);
    this.starNameEdit.toolTip = "Enter star name (e.g., Tarazed, gamma Aql, Vega)";
+   // A new name makes the position found by an earlier search stale. The dialog
+   // code that fills this box also clears it, and Search never writes the box,
+   // so it does not matter whether a program assignment fires this handler.
+   this.starNameEdit.onTextUpdated = function(text) {
+      self.sesameRaDec = null;
+      self.invalidateResults();
+   };
 
    var searchBtn = new PushButton(starGroupBox);
    searchBtn.text    = "Search";
@@ -1959,6 +2124,9 @@ constructor() {
       console.writeln("Sesame: searching '" + name + "'...");
       console.flush();
       var info = searchStarInfo(name);
+      // Keep the position for the air mass, in case the star was not picked from a solved frame.
+      self.sesameRaDec = info ? { ra: info.ra, dec: info.dec } : null;
+      self.invalidateResults();
       if (info) {
          console.writeln("  → RA=" + info.ra.toFixed(4)
             + " Dec=" + info.dec.toFixed(4)
@@ -2017,7 +2185,115 @@ constructor() {
    starGroupBox.sizer.add(vmagRow);
 
    // =====================================================
-   // Section 5: Analyze button
+   // Section 5: Atmospheric extinction
+   // =====================================================
+   var extSaved = loadExtinctionSettings();
+
+   this.extGroupBox = new GroupBox(this);
+   var extGroupBox = this.extGroupBox;
+   extGroupBox.title = "5. Atmospheric Extinction";
+   extGroupBox.sizer = new VerticalSizer;
+   extGroupBox.sizer.margin  = 8;
+   extGroupBox.sizer.spacing = 6;
+
+   this.extCheck = new CheckBox(extGroupBox);
+   this.extCheck.text    = "Correct for atmospheric extinction";
+   this.extCheck.toolTip = "The reference star is measured through the atmosphere, so the raw SQM comes out too "
+      + "bright by k \u00d7 airmass. Turn this off to get the raw value.";
+   this.extCheck.checked = extSaved.enabled;
+   this.extCheck.onCheck = function(checked) {
+      writeSetting("ExtinctionEnabled", DataType.Boolean, checked);
+      self.invalidateResults();
+   };
+
+   this.extKEdit = new NumericEdit(extGroupBox);
+   this.extKEdit.label.text = "k:";
+   this.extKEdit.label.setFixedWidth(90);
+   this.extKEdit.setRange(0, 1);
+   this.extKEdit.setPrecision(3);
+   this.extKEdit.setValue(extSaved.k);
+   this.extKEdit.toolTip = "Extinction coefficient in magnitudes per airmass, for the color channel used for the "
+      + "measurement. The default 0.20 is a typical value for a clear night; use your own if you know it.";
+   this.extKEdit.onValueUpdated = function(value) {
+      writeSetting("ExtinctionK", DataType.Real64, value);
+      self.invalidateResults();
+   };
+
+   var extKUnit = new Label(extGroupBox);
+   extKUnit.text = "mag/airmass  (for the color channel being measured)";
+   extKUnit.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
+
+   var extKRow = new HorizontalSizer;
+   extKRow.spacing = 6;
+   extKRow.add(this.extKEdit);
+   extKRow.add(extKUnit);
+   extKRow.addStretch();
+
+   var siteNote = new Label(extGroupBox);
+   siteNote.text = "Observing site \u2014 used only for frames whose headers have no site:";
+   siteNote.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
+
+   var latLabel = new Label(extGroupBox);
+   latLabel.text = "Latitude:";
+   latLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
+   latLabel.setFixedWidth(90);
+
+   this.siteLatEdit = new Edit(extGroupBox);
+   this.siteLatEdit.text = extSaved.lat;
+   this.siteLatEdit.setFixedWidth(130);
+   this.siteLatEdit.toolTip = "Latitude in degrees, north positive. Decimal (35.68) or degrees minutes seconds (35 40 48).";
+   this.siteLatEdit.onTextUpdated = function(text) {
+      writeSetting("SiteLatitude", DataType.String, text);
+      self.invalidateResults();
+   };
+
+   var latUnit = new Label(extGroupBox);
+   latUnit.text = "deg  (north +)";
+   latUnit.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
+
+   var lonLabel = new Label(extGroupBox);
+   lonLabel.text = "Longitude:";
+   lonLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
+   lonLabel.setFixedWidth(70);
+
+   this.siteLonEdit = new Edit(extGroupBox);
+   this.siteLonEdit.text = extSaved.lon;
+   this.siteLonEdit.setFixedWidth(130);
+   this.siteLonEdit.toolTip = "Longitude in degrees, EAST positive (west is negative; -180 to 180, or 0 to 360 east). Decimal (139.69) or degrees minutes seconds (139 41 30).";
+   this.siteLonEdit.onTextUpdated = function(text) {
+      writeSetting("SiteLongitude", DataType.String, text);
+      self.invalidateResults();
+   };
+
+   var lonUnit = new Label(extGroupBox);
+   lonUnit.text = "deg  (east +)";
+   lonUnit.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
+
+   var siteRow = new HorizontalSizer;
+   siteRow.spacing = 6;
+   siteRow.add(latLabel);
+   siteRow.add(this.siteLatEdit);
+   siteRow.add(latUnit);
+   siteRow.addSpacing(12);
+   siteRow.add(lonLabel);
+   siteRow.add(this.siteLonEdit);
+   siteRow.add(lonUnit);
+   siteRow.addStretch();
+
+   // What was found in the headers, and what is missing.
+   this.extStatusLabel = new Label(extGroupBox);
+   this.extStatusLabel.wordWrapping = true;
+   this.extStatusLabel.textAlignment = TextAlignment.Left | TextAlignment.VertCenter;
+   this.extStatusLabel.text = "";
+
+   extGroupBox.sizer.add(this.extCheck);
+   extGroupBox.sizer.add(extKRow);
+   extGroupBox.sizer.add(siteNote);
+   extGroupBox.sizer.add(siteRow);
+   extGroupBox.sizer.add(this.extStatusLabel);
+
+   // =====================================================
+   // Section 6: Analyze button
    // =====================================================
    this.analyzeBtn = new PushButton(this);
    this.analyzeBtn.text    = "  Analyze  ";
@@ -2038,7 +2314,7 @@ constructor() {
    analyzeSizer.addStretch();
 
    // =====================================================
-   // Section 6: Results
+   // Results
    // =====================================================
    var resultsGroupBox = new GroupBox(this);
    resultsGroupBox.title = "Results";
@@ -2048,6 +2324,7 @@ constructor() {
 
    this.resultSQMLabel        = new Label(resultsGroupBox);
    this.resultConditionLabel  = new Label(resultsGroupBox);
+   this.resultExtinctionLabel = new Label(resultsGroupBox);
    this.resultLSkyLabel       = new Label(resultsGroupBox);
    this.resultLStarLabel      = new Label(resultsGroupBox);
    this.resultPixScaleLabel   = new Label(resultsGroupBox);
@@ -2056,6 +2333,8 @@ constructor() {
    var labelStyle = TextAlignment.Left | TextAlignment.VertCenter;
    this.resultSQMLabel.textAlignment       = labelStyle;
    this.resultConditionLabel.textAlignment = labelStyle;
+   this.resultExtinctionLabel.textAlignment = labelStyle;
+   this.resultExtinctionLabel.wordWrapping = true;
    this.resultLSkyLabel.textAlignment      = labelStyle;
    this.resultLStarLabel.textAlignment     = labelStyle;
    this.resultPixScaleLabel.textAlignment  = labelStyle;
@@ -2069,6 +2348,7 @@ constructor() {
 
    resultsGroupBox.sizer.add(this.resultSQMLabel);
    resultsGroupBox.sizer.add(this.resultConditionLabel);
+   resultsGroupBox.sizer.add(this.resultExtinctionLabel);
    resultsGroupBox.sizer.add(this.resultLSkyLabel);
    resultsGroupBox.sizer.add(this.resultLStarLabel);
    resultsGroupBox.sizer.add(this.resultPixScaleLabel);
@@ -2127,6 +2407,7 @@ constructor() {
    this.sizer.add(equipGroupBox);
    this.sizer.add(measureGroupBox);
    this.sizer.add(starGroupBox);
+   this.sizer.add(extGroupBox);
    this.sizer.add(analyzeSizer);
    this.sizer.add(this.analyzeStatusLabel);
    this.sizer.add(resultsGroupBox);
@@ -2160,7 +2441,8 @@ constructor() {
                var status = !fd.used ? "Sat" : (!fd.fit_performed ? "No fit" : (fd.nonlinear ? "Nonlin" : "OK"));
                node.setText(4, isNaN(fd.adu_star) ? "\u2014" : Math.round(fd.adu_star).toString());
                node.setText(5, satPct + "% (" + satPx + ")");
-               node.setText(6, status);
+               node.setText(6, (typeof fd.airmass === "number" && isFinite(fd.airmass)) ? fd.airmass.toFixed(2) : "\u2014");
+               node.setText(7, status);
                filled = true;
                break;
             }
@@ -2170,6 +2452,7 @@ constructor() {
          node.setText(4, "\u2014");
          node.setText(5, "\u2014");
          node.setText(6, "\u2014");
+         node.setText(7, "\u2014");
       }
    }
    this.updateUI();
@@ -2209,6 +2492,68 @@ constructor() {
    this.analyzeStatusLabel.text = (missing.length > 0) ? missing.join("  /  ") : "Ready";
 
    this.analyzeBtn.enabled = (missing.length === 0);
+   this.updateExtinctionStatus();
+   }
+
+   // Manual observing site from the two edit boxes: { lat, lon } or null when
+   // empty or not valid (see siteEntryProblem() for the explanation).
+   manualSite() {
+   var lat = parseSexagesimal(this.siteLatEdit.text);
+   var lon = parseSexagesimal(this.siteLonEdit.text);
+   return chooseSite(null, { lat: lat, lon: lon });
+   }
+
+   // Why the entered site cannot be used, or null (nothing entered counts as fine).
+   siteEntryProblem() {
+   var latText = this.siteLatEdit.text.trim();
+   var lonText = this.siteLonEdit.text.trim();
+   if (latText === "" && lonText === "") return null;
+   if (latText === "" || lonText === "") return "Enter both latitude and longitude.";
+   if (this.manualSite() === null)
+      return "The entered latitude/longitude is not valid (latitude -90 to 90, longitude -180 to 180, or 0 to 360 east).";
+   return null;
+   }
+
+   // Position of the reference star for the air mass: the one tied to the sky
+   // when the star was picked (plate solution or catalog list), else the one
+   // from the name search. Precession is not applied (see docs/specs.md).
+   extinctionStar() {
+   return this.starRaDec || this.sesameRaDec || null;
+   }
+
+   // The options of the extinction correction as set in the dialog.
+   extinctionOptions() {
+   return {
+      enabled:    this.extCheck.checked,
+      k:          this.extKEdit.value,
+      star:       this.extinctionStar(),
+      manualSite: this.manualSite(),
+      siteEntryInvalid: this.siteEntryProblem() !== null
+   };
+   }
+
+   // One paragraph under the extinction controls: what the frame headers gave,
+   // so the operator knows before pressing Analyze whether the correction can run.
+   updateExtinctionStatus() {
+   var nf = this.frames.length;
+   var parts = [];
+   if (nf > 0) {
+      var nTime = 0, nSite = 0;
+      for (var i = 0; i < nf; i++) {
+         if (isFinite(this.frames[i].midTimeMs)) nTime++;
+         if (this.frames[i].site) nSite++;
+      }
+      parts.push("Time of exposure found in " + nTime + " of " + nf + " frames; observing site found in "
+         + nSite + " of " + nf + " frames.");
+      if (nSite < nf) {
+         parts.push(this.manualSite() ? "The entered site is used for the other frames."
+                                      : "No site for the other frames: enter one above.");
+      }
+   }
+   parts.push(this.extinctionStar() ? "Star position known." : "Star position not known yet.");
+   var problem = this.siteEntryProblem();
+   if (problem) parts.push(problem);
+   this.extStatusLabel.text = parts.join("  ");
    }
 
    // Pixel scale of the session: choosePixelScale() result (plate solution >
@@ -2289,6 +2634,7 @@ constructor() {
    clearResults() {
    this.resultSQMLabel.text       = "SQM:             \u2014";
    this.resultConditionLabel.text = "Sky Condition:   \u2014";
+   this.resultExtinctionLabel.text = "Extinction:      \u2014";
    this.resultLSkyLabel.text      = "L_sky:           \u2014";
    this.resultLStarLabel.text     = "L_star:          \u2014";
    this.resultPixScaleLabel.text  = "Pixel Scale:     \u2014";
@@ -2381,7 +2727,7 @@ constructor() {
    try {
       var result = runAnalysis(
          this.frames, this.bgX, this.bgY, this.starX, this.starY,
-         aperture, this.vmag, cam, pixelInfo, this.starRaDec);
+         aperture, this.vmag, cam, pixelInfo, this.starRaDec, this.extinctionOptions());
 
       if (!result) {
          var mb = new MessageBox(
@@ -2402,8 +2748,23 @@ constructor() {
       console.writeln("  Pixel Scale  = " + result.pixel_scale.toFixed(3) + " arcsec/px  ("
          + pixelScaleSourceText(result.pixel_scale_info.source) + ")");
       console.writeln("  L'_sky       = " + result.L_prime_sky.toFixed(6) + " counts/s/arcsec²");
+      var extR = result.extinction;
+      if (isFinite(result.sqm_uncorrected)) {
+         if (extR.corrected) {
+            console.writeln("  SQM (uncorrected) = " + result.sqm_uncorrected.toFixed(3) + " mag/arcsec²");
+            console.writeln("  Extinction: k=" + extR.k.toFixed(3) + " mag/airmass  airmass mean="
+               + extR.airmass.mean.toFixed(3) + " (min " + extR.airmass.min.toFixed(3) + ", max "
+               + extR.airmass.max.toFixed(3) + ")  correction=+" + extR.correction.toFixed(3) + " mag");
+            console.writeln("    time from: " + extR.timeSources.join("; ")
+               + "   site from: " + extR.siteSources.join("; "));
+         } else {
+            console.warningln("  Not corrected for atmospheric extinction: " + extR.reason);
+         }
+      }
       if (result.label !== null) {
-         console.writeln("  <b>SQM = " + result.sqm.toFixed(3) + " mag/arcsec²  → " + result.label + "</b>");
+         console.writeln("  <b>SQM = " + result.sqm.toFixed(3) + " mag/arcsec²"
+            + (extR.corrected ? "" : " (not corrected for atmospheric extinction)")
+            + "  → " + result.label + "</b>");
       } else {
          console.warningln("  SQM could not be computed: " + result.failure_reason);
       }
@@ -2424,7 +2785,20 @@ constructor() {
 
       var dash = "\u2014";
       this.resultSQMLabel.text = "SQM:             "
-         + (result.label !== null ? result.sqm.toFixed(3) + " mag/arcsec\u00b2" : dash);
+         + (result.label !== null
+            ? result.sqm.toFixed(3) + " mag/arcsec\u00b2"
+               + (extR.corrected ? "" : "  (not corrected for atmospheric extinction)")
+            : dash);
+      if (!isFinite(result.sqm_uncorrected)) {
+         this.resultExtinctionLabel.text = "Extinction:      " + dash;
+      } else if (extR.corrected) {
+         this.resultExtinctionLabel.text = "Extinction:      corrected by +" + extR.correction.toFixed(3)
+            + " mag  (uncorrected " + result.sqm_uncorrected.toFixed(3) + ";  k=" + extR.k.toFixed(3)
+            + " mag/airmass;  airmass " + extR.airmass.mean.toFixed(2) + " mean, "
+            + extR.airmass.min.toFixed(2) + " to " + extR.airmass.max.toFixed(2) + ")";
+      } else {
+         this.resultExtinctionLabel.text = "Extinction:      not corrected \u2014 " + extR.reason;
+      }
       this.resultConditionLabel.text = "Sky Condition:   " + (result.label !== null ? result.label : dash);
       this.resultLSkyLabel.text  = "L_sky:           " + fixedOrDash(result.L_sky, 4)
          + " counts/s/px  (R\u00b2=" + fixedOrDash(result.r2_sky, 4) + ")";
@@ -2439,6 +2813,7 @@ constructor() {
       if (result.r2_sky  < 0.99) warnings.push("R\u00b2_sky="  + result.r2_sky.toFixed(3)  + " is low \u2014 check background ROI for stars.");
       if (result.r2_star < 0.99) warnings.push("R\u00b2_star=" + result.r2_star.toFixed(3) + " is low \u2014 check star position and aperture.");
       if (result.failure_reason) warnings.push(result.failure_reason);
+      for (var xw = 0; xw < extR.warnings.length; xw++) warnings.push(extR.warnings[xw]);
       var psw = pixelScaleWarnings(result.pixel_scale_info);
       for (var pwi = 0; pwi < psw.length; pwi++) warnings.push(psw[pwi]);
       if (result.nonlinear_frames && result.nonlinear_frames.length > 0)

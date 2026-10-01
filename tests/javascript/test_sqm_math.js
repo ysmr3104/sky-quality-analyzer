@@ -471,6 +471,206 @@ assert(!(sBelow.spread > W), "pixelScale: spread 1.9% is not flagged");
 assert(sAbove.spread > W, "pixelScale: spread 2.5% is flagged");
 
 // ============================================================
+// Atmospheric extinction (issue #12)
+// ============================================================
+// Expected values come from published examples (Meeus, Astronomical Algorithms
+// 2nd ed.) and from Kasten & Young (1989), not from this implementation.
+console.log("\n--- extinction: Julian Date / sidereal time / altitude ---");
+
+// Meeus Example 7.a: 1957 October 4.81 -> JD 2436116.31
+assertClose(math.julianDateFromMs(Date.UTC(1957, 9, 4) + 0.81 * 86400000), 2436116.31, 1e-6, "JD: Meeus 7.a (1957-10-04.81)");
+// Unix epoch
+assertClose(math.julianDateFromMs(0), 2440587.5, 1e-9, "JD: 1970-01-01T00:00:00Z");
+
+// Meeus Example 12.a: 1987 April 10, 0h UT -> mean sidereal time 13h10m46.3668s
+assertClose(math.gmstDegrees(2446895.5), (13 + 10 / 60 + 46.3668 / 3600) * 15, 1e-5, "GMST: Meeus 12.a");
+assert(math.gmstDegrees(2446895.5) >= 0 && math.gmstDegrees(2400000.5) >= 0 && math.gmstDegrees(2400000.5) < 360,
+    "GMST: always in [0, 360)");
+
+// Meeus Example 13.b: Venus, 1987-04-10 19:21:00 UT, Washington (38d55m17s N,
+// 77d03m56s W), alpha = 23h09m16.641s, delta = -6d43m11.61s -> h = 15.1249 deg.
+// Meeus counts longitude west positive; here east is positive, so it is negative.
+// Meeus uses the apparent sidereal time (nutation); the mean one differs by ~1",
+// hence the 0.01 deg tolerance.
+var venusMs = Date.UTC(1987, 3, 10, 19, 21, 0);
+var venusJd = math.julianDateFromMs(venusMs);
+assertClose(venusJd, 2446896.30625, 1e-6, "JD: 1987-04-10 19:21 UT");
+var venusAlpha = (23 + 9 / 60 + 16.641 / 3600) * 15;
+var venusDelta = -(6 + 43 / 60 + 11.61 / 3600);
+var washLat = 38 + 55 / 60 + 17 / 3600;
+var washLon = -(77 + 3 / 60 + 56 / 3600);
+assertClose(math.altitudeDeg(venusAlpha, venusDelta, washLat, washLon, venusJd), 15.1249, 0.01,
+    "altitude: Meeus 13.b (Venus from Washington)");
+// Wrong sign of the longitude (west taken as east) must not give the same altitude
+assert(Math.abs(math.altitudeDeg(venusAlpha, venusDelta, washLat, -washLon, venusJd) - 15.1249) > 1,
+    "altitude: east/west sign matters");
+// Sanity: a star on the celestial pole has altitude = latitude at any time
+assertClose(math.altitudeDeg(0, 90, 40, 10, 2451545.0), 40, 1e-9, "altitude: celestial pole = latitude");
+
+console.log("\n--- extinction: air mass (Kasten & Young 1989) ---");
+assertClose(math.airmassKastenYoung(90), 0.9997, 0.0002, "airmass: zenith is about 1");
+// No table value is at hand to cite for h=30, so check the physics: the
+// plane-parallel air mass 1/sin(h) is 2.0 at h=30 and the curved, refracting
+// atmosphere gives a little less (the Earth's curvature lowers X near the horizon).
+var x30 = math.airmassKastenYoung(30);
+assert(x30 > 1.99 && x30 < 2.0, "airmass: h=30 is a little below 1/sin(h) = 2.0 (got " + x30.toFixed(4) + ")");
+var x45 = math.airmassKastenYoung(45);
+assert(x45 > 1.41 && x45 < 1.4143, "airmass: h=45 is a little below 1/sin(h) = 1.4142 (got " + x45.toFixed(4) + ")");
+assert(isNaN(math.airmassKastenYoung(9.99)), "airmass: below 10 deg is NaN");
+assert(isFinite(math.airmassKastenYoung(10)), "airmass: exactly 10 deg is computed");
+assert(isNaN(math.airmassKastenYoung(-5)), "airmass: below the horizon is NaN");
+assert(isNaN(math.airmassKastenYoung(NaN)), "airmass: NaN altitude is NaN");
+assert(math.airmassKastenYoung(45) < math.airmassKastenYoung(20), "airmass: grows toward the horizon");
+
+// Venus is at 15 deg in Meeus 13.b: above the 10 deg limit, so X is defined
+var fa = math.frameAirmass(venusAlpha, venusDelta, { lat: washLat, lon: washLon }, venusMs);
+assertClose(fa.altitude, 15.1249, 0.01, "frameAirmass: altitude");
+assertClose(fa.airmass, math.airmassKastenYoung(fa.altitude), 1e-12, "frameAirmass: airmass from that altitude");
+assert(isNaN(math.frameAirmass(venusAlpha, venusDelta, null, venusMs).airmass), "frameAirmass: no site -> NaN");
+assert(isNaN(math.frameAirmass(venusAlpha, venusDelta, { lat: washLat, lon: washLon }, NaN).airmass), "frameAirmass: no time -> NaN");
+assert(isNaN(math.frameAirmass(NaN, venusDelta, { lat: washLat, lon: washLon }, venusMs).airmass), "frameAirmass: no star -> NaN");
+// Six hours later Venus has set from this site
+var fb = math.frameAirmass(venusAlpha, venusDelta, { lat: washLat, lon: washLon }, venusMs + 6 * 3600000);
+assert(fb.altitude < 10 && isNaN(fb.airmass), "frameAirmass: below 10 deg -> NaN");
+
+console.log("\n--- extinction: correction amount ---");
+assertClose(math.extinctionCorrectionMag(0.25, 1.6), 0.40, 1e-12, "correction: k=0.25, X=1.6 -> +0.40 mag");
+assertClose(math.EXTINCTION_K_DEFAULT, 0.20, 0, "correction: default k is 0.20");
+
+console.log("\n--- extinction: date strings ---");
+var t0 = Date.UTC(2001, 1, 3, 4, 5, 6);   // 2001-02-03T04:05:06Z
+assertClose(math.parseFitsDateTime("2001-02-03T04:05:06"), t0, 0, "date: no Z, no fraction");
+assertClose(math.parseFitsDateTime("2001-02-03T04:05:06Z"), t0, 0, "date: with Z");
+assertClose(math.parseFitsDateTime("2001-02-03T04:05:06.250"), t0 + 250, 0.5, "date: milliseconds");
+assertClose(math.parseFitsDateTime("2001-02-03T04:05:06.250Z"), t0 + 250, 0.5, "date: milliseconds with Z");
+assertClose(math.parseFitsDateTime("'2001-02-03T04:05:06'"), t0, 0, "date: quoted");
+assertClose(math.parseFitsDateTime("2001-02-03 04:05:06"), t0, 0, "date: space instead of T");
+assertClose(math.parseFitsDateTime("2001-02-03", "04:05:06"), t0, 0, "date: DATE-OBS + TIME-OBS");
+assertClose(math.parseFitsDateTime("2001-02-03", "04:05:06.5"), t0 + 500, 0.5, "date: DATE-OBS + TIME-OBS with fraction");
+assertClose(math.parseFitsDateTime("2001-02-03T04:05:06", "11:11:11"), t0, 0, "date: TIME-OBS ignored when DATE-OBS has a time");
+assert(isNaN(math.parseFitsDateTime("2001-02-03")), "date: a date alone is not a time of exposure");
+assert(isNaN(math.parseFitsDateTime("2001-02-30T00:00:00")), "date: 30 February is rejected");
+assert(isNaN(math.parseFitsDateTime("2001-13-03T00:00:00")), "date: month 13 is rejected");
+assert(isNaN(math.parseFitsDateTime("garbage")), "date: garbage");
+assert(isNaN(math.parseFitsDateTime(null)), "date: null");
+assert(isNaN(math.parseFitsDateTime("2001-02-03", "junk")), "date: bad TIME-OBS");
+
+console.log("\n--- extinction: sexagesimal angles ---");
+assertClose(math.parseSexagesimal("+38 55 17.0"), 38 + 55 / 60 + 17.0 / 3600, 1e-9, "angle: '+38 55 17.0'");
+assertClose(math.parseSexagesimal("38:55:17"), 38 + 55 / 60 + 17 / 3600, 1e-9, "angle: '38:55:17'");
+assertClose(math.parseSexagesimal("-38 55 17"), -(38 + 55 / 60 + 17 / 3600), 1e-9, "angle: negative");
+assertClose(math.parseSexagesimal("-0 30 00"), -0.5, 1e-9, "angle: negative with zero degrees keeps the sign");
+assertClose(math.parseSexagesimal("-12:30"), -12.5, 1e-9, "angle: degrees and minutes");
+assertClose(math.parseSexagesimal("139.5"), 139.5, 1e-12, "angle: decimal");
+assertClose(math.parseSexagesimal("-38.92"), -38.92, 1e-12, "angle: negative decimal");
+assertClose(math.parseSexagesimal("'+35.1'"), 35.1, 1e-12, "angle: quoted decimal");
+assertClose(math.parseSexagesimal("3.51E1"), 35.1, 1e-9, "angle: exponent");
+assertClose(math.parseSexagesimal(12.5), 12.5, 0, "angle: number");
+assert(isNaN(math.parseSexagesimal("")), "angle: empty");
+assert(isNaN(math.parseSexagesimal("abc")), "angle: letters");
+assert(isNaN(math.parseSexagesimal("33 61 00")), "angle: minutes >= 60");
+assert(isNaN(math.parseSexagesimal("33 10 61")), "angle: seconds >= 60");
+assert(isNaN(math.parseSexagesimal("1 2 3 4")), "angle: four fields");
+assert(isNaN(math.parseSexagesimal(null)), "angle: null");
+
+console.log("\n--- extinction: middle of the exposure (priority) ---");
+var tA = "2001-02-03T04:00:00", tB = "2001-02-03T04:00:10";
+var tAms = Date.UTC(2001, 1, 3, 4, 0, 0);
+var mAvg = math.frameMidTime({ dateAvg: "2001-02-03T04:00:07", dateObs: tA, dateEnd: tB, exptime: 10 });
+assertClose(mAvg.ms, Date.UTC(2001, 1, 3, 4, 0, 7), 0, "mid time: DATE-AVG comes first");
+assert(mAvg.source === "DATE-AVG", "mid time: source DATE-AVG");
+var mMid = math.frameMidTime({ dateObs: tA, dateEnd: tB, exptime: 4 });
+assertClose(mMid.ms, tAms + 5000, 0, "mid time: midpoint of DATE-OBS and DATE-END (EXPTIME not used)");
+assert(/midpoint/.test(mMid.source), "mid time: source midpoint");
+var mBadAvg = math.frameMidTime({ dateAvg: "junk", dateObs: tA, dateEnd: tB, exptime: 10 });
+assertClose(mBadAvg.ms, tAms + 5000, 0, "mid time: unreadable DATE-AVG falls through");
+var mStart = math.frameMidTime({ dateObs: tA, dateObsComment: "Time of observation", exptime: 10 });
+assertClose(mStart.ms, tAms + 5000, 0, "mid time: DATE-OBS is the start -> add half");
+var mCal = math.frameMidTime({ dateObs: tA, dateObsComment: "UTC calendar date of exposure start", exptime: 10 });
+assertClose(mCal.ms, tAms + 5000, 0, "mid time: 'calendar' does not count as 'end'");
+var mExt = math.frameMidTime({ dateObs: tA, dateObsComment: "extended exposure start", exptime: 10 });
+assertClose(mExt.ms, tAms + 5000, 0, "mid time: 'extended' does not count as 'end'");
+var mStart2 = math.frameMidTime({ dateObs: tA, exptime: 10 });
+assertClose(mStart2.ms, tAms + 5000, 0, "mid time: no comment -> start");
+var mEnd = math.frameMidTime({ dateObs: tB, dateObsComment: "Time end of exposure", exptime: 10 });
+assertClose(mEnd.ms, tAms + 5000, 0, "mid time: comment says end -> subtract half");
+var mEnd2 = math.frameMidTime({ dateObs: tB, dateObsComment: "END OF EXPOSURE", exptime: 10 });
+assertClose(mEnd2.ms, tAms + 5000, 0, "mid time: 'end' matches in any case");
+assert(/end of exposure/.test(mEnd.source), "mid time: source says end");
+var mSplit = math.frameMidTime({ dateObs: "2001-02-03", timeObs: "04:00:00", exptime: 10 });
+assertClose(mSplit.ms, tAms + 5000, 0, "mid time: DATE-OBS + TIME-OBS");
+assert(math.frameMidTime({ dateObs: tA, exptime: NaN }) === null, "mid time: no EXPTIME and no DATE-END -> null");
+assert(math.frameMidTime({ dateObs: "2001-02-03", exptime: 10 }) === null, "mid time: date only -> null");
+assert(math.frameMidTime({ exptime: 10 }) === null, "mid time: nothing -> null");
+// DATE-END earlier than DATE-OBS (a writer that puts the end in DATE-OBS) must not be averaged
+var mOdd = math.frameMidTime({ dateObs: tB, dateObsComment: "Time end of exposure", dateEnd: tA, exptime: 10 });
+assertClose(mOdd.ms, tAms + 5000, 0, "mid time: DATE-END before DATE-OBS is not used as a midpoint");
+
+console.log("\n--- extinction: observing site (priority) ---");
+var s1 = math.siteFromKeywords({ sitelat: "+38 55 17.0", sitelong: "-77 03 56", obsgeoB: "10", obsgeoL: "20" });
+assert(s1 && s1.source === "SITELAT/SITELONG", "site: SITELAT/SITELONG comes first");
+assertClose(s1.lat, 38 + 55 / 60 + 17.0 / 3600, 1e-9, "site: latitude from sexagesimal");
+assertClose(s1.lon, -(77 + 3 / 60 + 56 / 3600), 1e-9, "site: longitude from sexagesimal");
+var s2 = math.siteFromKeywords({ obsgeoB: "35.5", obsgeoL: "139.25" });
+assert(s2 && s2.source === "OBSGEO-B/OBSGEO-L", "site: OBSGEO fallback");
+assertClose(s2.lat, 35.5, 0, "site: OBSGEO latitude");
+assertClose(s2.lon, 139.25, 0, "site: OBSGEO longitude");
+var s3 = math.siteFromKeywords({ sitelat: "35.5", sitelong: "junk", obsgeoB: "10", obsgeoL: "20" });
+assert(s3 && s3.source === "OBSGEO-B/OBSGEO-L", "site: a half-valid SITE pair falls through to OBSGEO");
+assert(math.siteFromKeywords({ sitelat: "95", sitelong: "10" }) === null, "site: latitude out of range");
+assert(math.siteFromKeywords({}) === null, "site: nothing -> null");
+assert(math.siteFromKeywords({ obsgeoB: "10" }) === null, "site: latitude only -> null");
+assertClose(math.siteFromKeywords({ obsgeoB: "10", obsgeoL: "250" }).lon, -110, 1e-9, "site: longitude 0..360 is folded");
+assert(math.chooseSite(s1, { lat: 1, lon: 2 }) === s1, "chooseSite: header wins over manual entry");
+var cs = math.chooseSite(null, { lat: 35.5, lon: 139.25 });
+assert(cs && cs.source === "manual entry" && cs.lat === 35.5 && cs.lon === 139.25, "chooseSite: manual entry is the fallback");
+assert(math.chooseSite(null, null) === null, "chooseSite: none");
+assert(math.chooseSite(null, { lat: NaN, lon: 2 }) === null, "chooseSite: invalid manual entry");
+
+console.log("\n--- extinction: summary and decision ---");
+var sm = math.summarizeAirmass([1.2, NaN, 1.6, 1.4]);
+assert(sm.count === 3, "summary: NaN values are left out");
+assertClose(sm.mean, 1.4, 1e-12, "summary: mean");
+assertClose(sm.min, 1.2, 0, "summary: min");
+assertClose(sm.max, 1.6, 0, "summary: max");
+assert(math.summarizeAirmass([NaN]).count === 0 && isNaN(math.summarizeAirmass([]).mean), "summary: nothing finite");
+
+function ext(over) {
+    var o = { enabled: true, k: 0.25, hasStar: true, airmasses: [1.5, 1.7], nWithTime: 2, nWithSite: 2 };
+    for (var key in over) o[key] = over[key];
+    return math.decideExtinction(o);
+}
+var dOk = ext({});
+assert(dOk.corrected && dOk.reason === null, "decision: corrected when everything is known");
+assertClose(dOk.correction, 0.25 * 1.6, 1e-12, "decision: correction = k * mean X");
+assertClose(dOk.airmass.min, 1.5, 0, "decision: min X kept");
+assertClose(dOk.airmass.max, 1.7, 0, "decision: max X kept");
+assert(dOk.warnings.length === 0, "decision: no warning at low air mass");
+assert(!ext({ enabled: false }).corrected && /turned off/.test(ext({ enabled: false }).reason), "decision: turned off");
+assert(!ext({ hasStar: false }).corrected && /star/.test(ext({ hasStar: false }).reason), "decision: no star position");
+var dNoTime = ext({ nWithTime: 0, airmasses: [NaN, NaN] });
+assert(!dNoTime.corrected && /time of exposure/.test(dNoTime.reason), "decision: no time");
+var dNoSite = ext({ nWithSite: 0, airmasses: [NaN, NaN] });
+assert(!dNoSite.corrected && /observing site/.test(dNoSite.reason), "decision: no site");
+var dNone = ext({ airmasses: [], nWithTime: 0, nWithSite: 0 });
+assert(!dNone.corrected && /No frame was usable/.test(dNone.reason), "decision: no frame in the star fit");
+var dBadSite = ext({ nWithSite: 0, airmasses: [NaN, NaN], siteEntryInvalid: true });
+assert(!dBadSite.corrected && /entered latitude\/longitude is not valid/.test(dBadSite.reason), "decision: invalid site entry has its own reason");
+var dLow = ext({ airmasses: [NaN, NaN] });
+assert(!dLow.corrected && /10 degrees/.test(dLow.reason), "decision: below 10 deg in every frame");
+assert(!ext({ k: NaN }).corrected, "decision: k not a number");
+assert(!ext({ k: -0.1 }).corrected, "decision: negative k");
+assert(ext({ k: 0 }).corrected && ext({ k: 0 }).correction === 0, "decision: k = 0 is allowed (no change)");
+var dHigh = ext({ airmasses: [1.9, 2.3] });
+assert(dHigh.corrected && dHigh.warnings.length === 1 && /low in the sky/.test(dHigh.warnings[0]), "decision: X > 2 warns but still corrects");
+var dPart = ext({ airmasses: [1.5, NaN] });
+assert(dPart.corrected && dPart.warnings.length === 1 && /1 of 2/.test(dPart.warnings[0]), "decision: partly known air mass warns");
+assertClose(dPart.correction, 0.25 * 1.5, 1e-12, "decision: partly known uses the mean of the known ones");
+// The corrected SQM is the raw one plus k * X, i.e. a larger number
+var rawSqm = math.computeSQM(1000, 10, 2.0);
+assert(rawSqm + dOk.correction > rawSqm, "decision: correction makes the SQM larger");
+
+// ============================================================
 // Summary
 // ============================================================
 console.log("\n============================");

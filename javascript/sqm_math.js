@@ -466,6 +466,299 @@ function significantPixelCentroid(pixels, mean, std) {
 }
 
 // ============================================================
+// Atmospheric extinction (issue #12)
+// ============================================================
+// The reference star is measured through the atmosphere, but its catalog V
+// magnitude is the value outside it. The star looks fainter by k * X, so
+// SQM_raw comes out k * X too bright (too small a number). The corrected value
+// is the sky brightness as seen from the ground: SQM = SQM_raw + k * X.
+
+var EXTINCTION_K_DEFAULT = 0.20;  // mag/airmass
+var MIN_ALTITUDE_DEG     = 10;    // lower than this, the airmass formula is not trusted
+var HIGH_AIRMASS_WARN    = 2.0;   // about 30 degrees of altitude
+
+/**
+ * Parse an angle given as a decimal number or as a sexagesimal string
+ * ("+38 55 17.0", "38:55:17", "-12 30"). Returns degrees, or NaN.
+ * @param {string|number} str
+ * @returns {number}
+ */
+function parseSexagesimal(str) {
+    if (typeof str === "number") return isFinite(str) ? str : NaN;
+    if (typeof str !== "string") return NaN;
+    var s = str.trim().replace(/^'|'$/g, "").trim();
+    if (s === "") return NaN;
+    // Plain number (FITS also allows a D exponent)
+    var single = s.replace(/[dD]/, "e");
+    if (/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(single)) return parseFloat(single);
+    var negative = (s.charAt(0) === "-");
+    var body = s.replace(/^[+-]/, "").trim();
+    var parts = body.split(/[\s:]+/);
+    if (parts.length < 2 || parts.length > 3) return NaN;
+    var nums = [];
+    for (var i = 0; i < parts.length; i++) {
+        var isLast = (i === parts.length - 1);
+        var re = isLast ? /^(\d+\.?\d*|\.\d+)$/ : /^\d+$/;
+        if (!re.test(parts[i])) return NaN;
+        nums.push(parseFloat(parts[i]));
+    }
+    if (nums[1] >= 60) return NaN;
+    if (nums.length === 3 && nums[2] >= 60) return NaN;
+    var v = nums[0] + nums[1] / 60 + (nums.length === 3 ? nums[2] / 3600 : 0);
+    return negative ? -v : v;
+}
+
+/**
+ * Parse a FITS date-time as UTC. Accepts "YYYY-MM-DDThh:mm:ss[.fff][Z]" (a space
+ * may replace the T). A date without a time is accepted only when timeStr
+ * ("hh:mm:ss[.fff]", the TIME-OBS keyword) supplies one: midnight would be a
+ * wrong time of exposure, so a bare date gives NaN.
+ * @param {string} dateStr
+ * @param {string} [timeStr]
+ * @returns {number} milliseconds since 1970-01-01T00:00:00 UTC, or NaN
+ */
+function parseFitsDateTime(dateStr, timeStr) {
+    if (typeof dateStr !== "string") return NaN;
+    var s = dateStr.trim().replace(/^'|'$/g, "").trim();
+    var m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2}(?:\.\d*)?|\.\d+))?\s*Z?$/i.exec(s);
+    if (!m) return NaN;
+    var hh = m[4], mi = m[5], ss = m[6];
+    if (hh === undefined) {
+        if (typeof timeStr !== "string") return NaN;
+        var t = timeStr.trim().replace(/^'|'$/g, "").trim();
+        var tm = /^(\d{2}):(\d{2}):(\d{2}(?:\.\d*)?)\s*Z?$/i.exec(t);
+        if (!tm) return NaN;
+        hh = tm[1]; mi = tm[2]; ss = tm[3];
+    }
+    var y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+    var h = parseInt(hh, 10), mn = parseInt(mi, 10), sec = parseFloat(ss);
+    if (y < 1900 || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mn > 59 || !(sec < 61)) return NaN;
+    var dayMs = Date.UTC(y, mo - 1, d);
+    if (new Date(dayMs).getUTCDate() !== d) return NaN;  // 02-30 and the like
+    return dayMs + h * 3600000 + mn * 60000 + sec * 1000;
+}
+
+/**
+ * Middle of the exposure of one frame, from FITS keyword strings.
+ * Order: DATE-AVG; the midpoint of DATE-OBS and DATE-END; DATE-OBS with EXPTIME.
+ * In the last case DATE-OBS is the start of the exposure (FITS standard), unless
+ * its comment contains "end" (DWARF writes "Time end of exposure"): then it is
+ * the end, and half of EXPTIME is subtracted.
+ * @param {{dateAvg:?string, dateObs:?string, timeObs:?string, dateObsComment:?string,
+ *          dateEnd:?string, exptime:number}} k
+ * @returns {{ms:number, source:string}|null}
+ */
+function frameMidTime(k) {
+    var avg = parseFitsDateTime(k.dateAvg);
+    if (isFinite(avg)) return { ms: avg, source: "DATE-AVG" };
+
+    var start = parseFitsDateTime(k.dateObs, k.timeObs);
+    var end   = parseFitsDateTime(k.dateEnd);
+    if (isFinite(start) && isFinite(end) && end >= start) {
+        return { ms: (start + end) / 2, source: "midpoint of DATE-OBS and DATE-END" };
+    }
+    if (isFinite(start) && typeof k.exptime === "number" && k.exptime > 0) {
+        var comment = (typeof k.dateObsComment === "string") ? k.dateObsComment : "";
+        if (/\bend\b/i.test(comment)) {
+            return { ms: start - k.exptime * 500, source: "DATE-OBS (end of exposure) minus half of EXPTIME" };
+        }
+        return { ms: start + k.exptime * 500, source: "DATE-OBS plus half of EXPTIME" };
+    }
+    return null;
+}
+
+/**
+ * Observing site from FITS keyword strings (degrees, east longitude positive).
+ * Order: SITELAT/SITELONG, then OBSGEO-B/OBSGEO-L. A pair is used only when
+ * both values are valid. Longitude is folded into [-180, 180].
+ * @param {{sitelat:?string, sitelong:?string, obsgeoB:?string, obsgeoL:?string}} k
+ * @returns {{lat:number, lon:number, source:string}|null}
+ */
+function siteFromKeywords(k) {
+    var pairs = [
+        { a: k.sitelat, b: k.sitelong, source: "SITELAT/SITELONG" },
+        { a: k.obsgeoB, b: k.obsgeoL,  source: "OBSGEO-B/OBSGEO-L" }
+    ];
+    for (var i = 0; i < pairs.length; i++) {
+        var lat = parseSexagesimal(pairs[i].a);
+        var lon = parseSexagesimal(pairs[i].b);
+        if (!isFinite(lat) || !isFinite(lon)) continue;
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 360) continue;
+        if (lon > 180) lon -= 360;
+        return { lat: lat, lon: lon, source: pairs[i].source };
+    }
+    return null;
+}
+
+/**
+ * Site to use for a frame: the one from its header, else the manual entry.
+ * @param {{lat:number, lon:number, source:string}|null} headerSite
+ * @param {{lat:number, lon:number}|null} manualSite
+ * @returns {{lat:number, lon:number, source:string}|null}
+ */
+function chooseSite(headerSite, manualSite) {
+    if (headerSite) return headerSite;
+    if (manualSite && isFinite(manualSite.lat) && isFinite(manualSite.lon)
+        && manualSite.lat >= -90 && manualSite.lat <= 90
+        && manualSite.lon >= -180 && manualSite.lon <= 360) {
+        var lon = manualSite.lon > 180 ? manualSite.lon - 360 : manualSite.lon;
+        return { lat: manualSite.lat, lon: lon, source: "manual entry" };
+    }
+    return null;
+}
+
+/**
+ * Julian Date from milliseconds since the Unix epoch (UTC).
+ * @param {number} ms
+ * @returns {number}
+ */
+function julianDateFromMs(ms) {
+    return ms / 86400000 + 2440587.5;
+}
+
+/**
+ * Mean Greenwich sidereal time [degrees, 0..360) at a Julian Date
+ * (Meeus, Astronomical Algorithms, formula 12.4).
+ * @param {number} jd
+ * @returns {number}
+ */
+function gmstDegrees(jd) {
+    var T = (jd - 2451545.0) / 36525;
+    var th = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
+        + 0.000387933 * T * T - T * T * T / 38710000;
+    th = th % 360;
+    return th < 0 ? th + 360 : th;
+}
+
+/**
+ * Altitude [degrees] of a point on the sky (no refraction).
+ * @param {number} raDeg   - right ascension [deg]
+ * @param {number} decDeg  - declination [deg]
+ * @param {number} latDeg  - site latitude [deg, north positive]
+ * @param {number} lonDeg  - site longitude [deg, EAST positive]
+ * @param {number} jd      - Julian Date (UT)
+ * @returns {number}
+ */
+function altitudeDeg(raDeg, decDeg, latDeg, lonDeg, jd) {
+    var D = Math.PI / 180;
+    var lst = gmstDegrees(jd) + lonDeg;     // local sidereal time
+    var H = (lst - raDeg) * D;              // hour angle
+    var sinH = Math.sin(latDeg * D) * Math.sin(decDeg * D)
+        + Math.cos(latDeg * D) * Math.cos(decDeg * D) * Math.cos(H);
+    sinH = Math.max(-1, Math.min(1, sinH));
+    return Math.asin(sinH) / D;
+}
+
+/**
+ * Relative air mass, Kasten & Young (1989):
+ *   X = 1 / (sin h + 0.50572 (h + 6.07995)^-1.6364), h in degrees.
+ * Returns NaN below MIN_ALTITUDE_DEG or when h is not a finite number.
+ * @param {number} hDeg
+ * @returns {number}
+ */
+function airmassKastenYoung(hDeg) {
+    if (typeof hDeg !== "number" || !isFinite(hDeg) || hDeg < MIN_ALTITUDE_DEG) return NaN;
+    var s = Math.sin(hDeg * Math.PI / 180);
+    return 1 / (s + 0.50572 * Math.pow(hDeg + 6.07995, -1.6364));
+}
+
+/**
+ * Altitude and air mass of the star in one frame.
+ * Coordinates are used as given (J2000, no precession: about 22 arcmin in 2026,
+ * well under 0.01 mag in the correction).
+ * @param {number} raDeg
+ * @param {number} decDeg
+ * @param {{lat:number, lon:number}|null} site
+ * @param {number} ms - middle of the exposure, ms since the Unix epoch (UTC)
+ * @returns {{altitude:number, airmass:number}}
+ */
+function frameAirmass(raDeg, decDeg, site, ms) {
+    if (!site || !isFinite(ms) || !isFinite(raDeg) || !isFinite(decDeg)) {
+        return { altitude: NaN, airmass: NaN };
+    }
+    var alt = altitudeDeg(raDeg, decDeg, site.lat, site.lon, julianDateFromMs(ms));
+    return { altitude: alt, airmass: airmassKastenYoung(alt) };
+}
+
+/**
+ * Correction [mag] to add to SQM_raw.
+ * @param {number} k - extinction coefficient [mag/airmass]
+ * @param {number} X - air mass
+ * @returns {number}
+ */
+function extinctionCorrectionMag(k, X) {
+    return k * X;
+}
+
+/**
+ * Mean, minimum and maximum of the finite values.
+ * @param {number[]} values
+ * @returns {{count:number, mean:number, min:number, max:number}}
+ */
+function summarizeAirmass(values) {
+    var n = 0, sum = 0, lo = Infinity, hi = -Infinity;
+    for (var i = 0; i < values.length; i++) {
+        var v = values[i];
+        if (typeof v !== "number" || !isFinite(v)) continue;
+        n++; sum += v;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+    }
+    if (n === 0) return { count: 0, mean: NaN, min: NaN, max: NaN };
+    return { count: n, mean: sum / n, min: lo, max: hi };
+}
+
+/**
+ * Decide whether the extinction correction can be applied, and by how much.
+ * Messages are for the operator: they say what to do and use no internal names.
+ * @param {{enabled:boolean, k:number, hasStar:boolean, airmasses:number[],
+ *          nWithTime:number, nWithSite:number, siteEntryInvalid:(boolean|undefined)}} info
+ *   airmasses - air mass of each frame that went into the star fit (NaN when unknown)
+ *   nWithTime - how many of those frames have a usable time of exposure
+ *   nWithSite - how many of those frames have an observing site
+ *   siteEntryInvalid - something was typed in the site boxes but it cannot be used
+ * @returns {{corrected:boolean, reason:(string|null), k:number, correction:number,
+ *            airmass:{count:number, mean:number, min:number, max:number},
+ *            warnings:string[]}}
+ */
+function decideExtinction(info) {
+    var stats = summarizeAirmass(info.airmasses);
+    var out = { corrected: false, reason: null, k: info.k, correction: 0, airmass: stats, warnings: [] };
+    if (!info.enabled) {
+        out.reason = "Correction is turned off.";
+    } else if (!(typeof info.k === "number" && isFinite(info.k) && info.k >= 0)) {
+        out.reason = "The extinction coefficient is not a valid number.";
+    } else if (!info.hasStar) {
+        out.reason = "The sky position of the reference star is unknown"
+            + " — pick the star from the catalog list in a plate-solved frame, or search it by name.";
+    } else if (info.airmasses.length === 0) {
+        out.reason = "No frame was usable for the star measurement, so there is no air mass to correct for.";
+    } else if (info.nWithTime === 0) {
+        out.reason = "No time of exposure in the frame headers"
+            + " (DATE-AVG, DATE-OBS with DATE-END, or DATE-OBS with EXPTIME).";
+    } else if (info.nWithSite === 0) {
+        out.reason = info.siteEntryInvalid
+            ? "The entered latitude/longitude is not valid (latitude -90 to 90, longitude -180 to 180, or 0 to 360 east)."
+            : "No observing site: the frame headers have none and no latitude/longitude was entered.";
+    } else if (stats.count === 0) {
+        out.reason = "The star was lower than " + MIN_ALTITUDE_DEG + " degrees above the horizon in every frame.";
+    }
+    if (out.reason !== null) return out;
+
+    out.corrected = true;
+    out.correction = extinctionCorrectionMag(info.k, stats.mean);
+    if (stats.max > HIGH_AIRMASS_WARN) {
+        out.warnings.push("The star was low in the sky (air mass up to " + stats.max.toFixed(2)
+            + ", altitude below about 30 degrees): the extinction correction is large and uncertain.");
+    }
+    if (stats.count < info.airmasses.length) {
+        out.warnings.push("The air mass is known for only " + stats.count + " of "
+            + info.airmasses.length + " frames used for the star; the correction uses their mean.");
+    }
+    return out;
+}
+
+// ============================================================
 // Node.js export
 // ============================================================
 
@@ -493,6 +786,22 @@ if (typeof module !== "undefined") {
         significantPixelCentroid: significantPixelCentroid,
         CENTROID_WARN_SHIFT_PX:   CENTROID_WARN_SHIFT_PX,
         CENTROID_MIN_SIGMA:       CENTROID_MIN_SIGMA,
-        CENTROID_MIN_PIXELS:      CENTROID_MIN_PIXELS
+        CENTROID_MIN_PIXELS:      CENTROID_MIN_PIXELS,
+        EXTINCTION_K_DEFAULT:     EXTINCTION_K_DEFAULT,
+        MIN_ALTITUDE_DEG:         MIN_ALTITUDE_DEG,
+        HIGH_AIRMASS_WARN:        HIGH_AIRMASS_WARN,
+        parseSexagesimal:         parseSexagesimal,
+        parseFitsDateTime:        parseFitsDateTime,
+        frameMidTime:             frameMidTime,
+        siteFromKeywords:         siteFromKeywords,
+        chooseSite:               chooseSite,
+        julianDateFromMs:         julianDateFromMs,
+        gmstDegrees:              gmstDegrees,
+        altitudeDeg:              altitudeDeg,
+        airmassKastenYoung:       airmassKastenYoung,
+        frameAirmass:             frameAirmass,
+        extinctionCorrectionMag:  extinctionCorrectionMag,
+        summarizeAirmass:         summarizeAirmass,
+        decideExtinction:         decideExtinction
     };
 }
